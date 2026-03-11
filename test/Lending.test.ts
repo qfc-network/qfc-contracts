@@ -31,7 +31,7 @@ describe("QFC Lending Protocol", function () {
     );
 
     // Deploy PriceOracle
-    const PriceOracle = await ethers.getContractFactory("PriceOracle");
+    const PriceOracle = await ethers.getContractFactory("contracts/lending/PriceOracle.sol:PriceOracle");
     const oracle = await PriceOracle.deploy();
 
     // Set prices: QFC=$10, TTK=$5, QUSD=$1
@@ -595,7 +595,7 @@ describe("QFC Lending Protocol", function () {
 
     it("should update oracle", async function () {
       const { pool, owner } = await loadFixture(deployLendingFixture);
-      const NewOracle = await ethers.getContractFactory("PriceOracle");
+      const NewOracle = await ethers.getContractFactory("contracts/lending/PriceOracle.sol:PriceOracle");
       const newOracle = await NewOracle.deploy();
       await expect(pool.setOracle(await newOracle.getAddress()))
         .to.emit(pool, "OracleUpdated");

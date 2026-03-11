@@ -32,18 +32,29 @@ contract MinerRegistry is Ownable {
     /// @notice TaskRegistry address, authorized to update miner stats
     address public taskRegistry;
 
+    /// @notice ResultVerifier address, authorized to slash miners
+    address public resultVerifier;
+
     event MinerRegistered(address indexed miner, uint8 tier, string endpoint);
     event MinerStatusUpdated(address indexed miner, Status status);
     event MinerStatsUpdated(address indexed miner, uint256 completed, uint256 failed, uint256 reputation);
+    event MinerSlashed(address indexed miner, uint256 amount);
     event TaskRegistrySet(address indexed taskRegistry);
+    event ResultVerifierSet(address indexed resultVerifier);
 
     error AlreadyRegistered();
     error NotRegistered();
     error InvalidTier(uint8 tier);
     error OnlyTaskRegistry();
+    error OnlyResultVerifier();
 
     modifier onlyTaskRegistry() {
         if (msg.sender != taskRegistry) revert OnlyTaskRegistry();
+        _;
+    }
+
+    modifier onlyResultVerifier() {
+        if (msg.sender != resultVerifier) revert OnlyResultVerifier();
         _;
     }
 
@@ -57,6 +68,16 @@ contract MinerRegistry is Ownable {
         require(_taskRegistry != address(0), "Zero address");
         taskRegistry = _taskRegistry;
         emit TaskRegistrySet(_taskRegistry);
+    }
+
+    /**
+     * @notice Set the ResultVerifier address. Only owner.
+     * @param _resultVerifier Address of the ResultVerifier contract.
+     */
+    function setResultVerifier(address _resultVerifier) external onlyOwner {
+        require(_resultVerifier != address(0), "Zero address");
+        resultVerifier = _resultVerifier;
+        emit ResultVerifierSet(_resultVerifier);
     }
 
     /**
@@ -112,6 +133,22 @@ contract MinerRegistry is Ownable {
         m.failed++;
         _updateReputation(m);
         emit MinerStatsUpdated(miner, m.completed, m.failed, m.reputation);
+    }
+
+    /**
+     * @notice Slash a miner's reputation. Called by ResultVerifier.
+     * @param miner The miner address to slash.
+     * @param amount The reputation points to deduct.
+     */
+    function slash(address miner, uint256 amount) external onlyResultVerifier {
+        Miner storage m = _miners[miner];
+        if (!m.registered) revert NotRegistered();
+        if (m.reputation > amount) {
+            m.reputation -= amount;
+        } else {
+            m.reputation = 0;
+        }
+        emit MinerSlashed(miner, amount);
     }
 
     /**

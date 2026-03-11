@@ -15,7 +15,7 @@ contract ResultVerifier is Ownable {
     enum ChallengeStatus { Open, Upheld, Rejected, Expired }
 
     struct Challenge {
-        uint256 taskId;
+        bytes32 taskId;
         address challenger;
         string reason;
         ChallengeStatus status;
@@ -34,13 +34,13 @@ contract ResultVerifier is Ownable {
 
     mapping(uint256 => Challenge) private _challenges;
     /// @dev taskId => challengeId (one challenge per task)
-    mapping(uint256 => uint256) public taskChallenge;
+    mapping(bytes32 => uint256) public taskChallenge;
     /// @dev challengeId => validator => voted
     mapping(uint256 => mapping(address => bool)) public hasVoted;
     /// @dev validator address => authorized
     mapping(address => bool) public validators;
 
-    event ChallengeCreated(uint256 indexed challengeId, uint256 indexed taskId, address indexed challenger);
+    event ChallengeCreated(uint256 indexed challengeId, bytes32 indexed taskId, address indexed challenger);
     event VoteCast(uint256 indexed challengeId, address indexed validator, bool uphold);
     event ChallengeResolved(uint256 indexed challengeId, ChallengeStatus status);
     event ValidatorAdded(address indexed validator);
@@ -48,9 +48,9 @@ contract ResultVerifier is Ownable {
     event ChallengeWindowUpdated(uint256 newWindow);
     event SlashAmountUpdated(uint256 newAmount);
 
-    error TaskNotCompleted(uint256 taskId);
-    error ChallengeWindowClosed(uint256 taskId);
-    error AlreadyChallenged(uint256 taskId);
+    error TaskNotCompleted(bytes32 taskId);
+    error ChallengeWindowClosed(bytes32 taskId);
+    error AlreadyChallenged(bytes32 taskId);
     error ChallengeNotFound(uint256 challengeId);
     error ChallengeNotOpen(uint256 challengeId);
     error NotValidator(address addr);
@@ -72,7 +72,7 @@ contract ResultVerifier is Ownable {
     /// @notice Challenge a completed task's result
     /// @param taskId The completed task to challenge
     /// @param reason Description of why the result is wrong
-    function challenge(uint256 taskId, string calldata reason) external payable returns (uint256 challengeId) {
+    function challenge(bytes32 taskId, string calldata reason) external payable returns (uint256 challengeId) {
         if (msg.value < minChallengeStake) revert InsufficientStake(minChallengeStake, msg.value);
 
         TaskRegistry.Task memory task = taskRegistry.getTask(taskId);

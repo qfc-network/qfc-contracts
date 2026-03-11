@@ -17,7 +17,7 @@ describe("Perpetuals", function () {
     );
 
     // Deploy PriceOracle
-    const Oracle = await ethers.getContractFactory("PriceOracle");
+    const Oracle = await ethers.getContractFactory("contracts/perps/PriceOracle.sol:PriceOracle");
     const oracle = await Oracle.deploy();
 
     // Set prices
