@@ -142,25 +142,9 @@ contract StakingPool is ReentrancyGuard, Ownable {
     /**
      * @dev Withdraw all and claim rewards
      */
-    function exit() external nonReentrant updateReward(msg.sender) {
-        uint256 amount = stakes[msg.sender].amount;
-        require(amount > 0, "Nothing to withdraw");
-        require(
-            block.timestamp >= stakes[msg.sender].stakeTime + lockPeriod,
-            "Still locked"
-        );
-
-        totalStaked -= amount;
-        stakes[msg.sender].amount = 0;
-        stakingToken.safeTransfer(msg.sender, amount);
-        emit Withdrawn(msg.sender, amount);
-
-        uint256 reward = stakes[msg.sender].rewards;
-        if (reward > 0) {
-            stakes[msg.sender].rewards = 0;
-            rewardToken.safeTransfer(msg.sender, reward);
-            emit RewardPaid(msg.sender, reward);
-        }
+    function exit() external {
+        this.withdraw(stakes[msg.sender].amount);
+        this.claimRewards();
     }
 
     /**
