@@ -1,25 +1,34 @@
 import { expect } from "chai";
 import { ethers } from "hardhat";
-import { loadFixture, time } from "@nomicfoundation/hardhat-network-helpers";
+import { loadFixture } from "@nomicfoundation/hardhat-network-helpers";
 
-describe("Inference Contracts", function () {
-  async function deployInferenceFixture() {
-    const [owner, submitter, miner, miner2, validator, challenger] =
-      await ethers.getSigners();
+describe("Inference Marketplace", function () {
+  // Model IDs
+  const LLAMA3_8B = ethers.id("llama3-8b");
+  const LLAMA3_70B = ethers.id("llama3-70b");
+  const WHISPER = ethers.id("whisper-large-v3");
 
-    // Deploy ModelRegistry
+  const BASE_FEE_8B = ethers.parseEther("0.01");
+  const BASE_FEE_70B = ethers.parseEther("0.05");
+  const BASE_FEE_WHISPER = ethers.parseEther("0.005");
+
+  const INPUT_HASH = ethers.id("test-input-data");
+  const RESULT_HASH = ethers.id("test-result-data");
+  const PROOF = ethers.id("test-proof");
+
+  async function deployFixture() {
+    const [owner, router, miner1, miner2, user1, user2] = await ethers.getSigners();
+
+    // Deploy contracts
     const ModelRegistry = await ethers.getContractFactory("ModelRegistry");
     const modelRegistry = await ModelRegistry.deploy();
 
-    // Deploy MinerRegistry (min stake = 1 ETH)
     const MinerRegistry = await ethers.getContractFactory("MinerRegistry");
-    const minerRegistry = await MinerRegistry.deploy(ethers.parseEther("1"));
+    const minerRegistry = await MinerRegistry.deploy();
 
-    // Deploy FeeEscrow (2.5% protocol fee)
     const FeeEscrow = await ethers.getContractFactory("FeeEscrow");
-    const feeEscrow = await FeeEscrow.deploy(250, owner.address);
+    const feeEscrow = await FeeEscrow.deploy();
 
-    // Deploy TaskRegistry
     const TaskRegistry = await ethers.getContractFactory("TaskRegistry");
     const taskRegistry = await TaskRegistry.deploy(
       await modelRegistry.getAddress(),
@@ -27,472 +36,411 @@ describe("Inference Contracts", function () {
       await feeEscrow.getAddress()
     );
 
-    // Deploy ResultVerifier (slash 0.5 ETH, min challenge stake 0.1 ETH)
-    const ResultVerifier = await ethers.getContractFactory("ResultVerifier");
-    const resultVerifier = await ResultVerifier.deploy(
-      await taskRegistry.getAddress(),
-      await minerRegistry.getAddress(),
-      ethers.parseEther("0.5"),
-      ethers.parseEther("0.1")
-    );
+    // Wire together
+    await minerRegistry.setTaskRegistry(await taskRegistry.getAddress());
+    await feeEscrow.setTaskRegistry(await taskRegistry.getAddress());
+    await taskRegistry.setRouter(router.address);
 
-    // Transfer FeeEscrow ownership to TaskRegistry (so it can deposit/release/refund)
-    await feeEscrow.transferOwnership(await taskRegistry.getAddress());
+    // Register models
+    await modelRegistry.registerModel(LLAMA3_8B, "llama3-8b", 1, BASE_FEE_8B);
+    await modelRegistry.registerModel(LLAMA3_70B, "llama3-70b", 2, BASE_FEE_70B);
+    await modelRegistry.registerModel(WHISPER, "whisper-large-v3", 1, BASE_FEE_WHISPER);
 
-    // Authorize TaskRegistry and ResultVerifier on MinerRegistry
-    await minerRegistry.authorizeCaller(await taskRegistry.getAddress());
-    await minerRegistry.authorizeCaller(await resultVerifier.getAddress());
-
-    // Register a model
-    await modelRegistry.registerModel(
-      "llama-3-70b",
-      "Llama 3 70B",
-      ethers.parseEther("0.01"), // base fee
-      1 // min tier
-    );
-
-    return {
-      modelRegistry,
-      minerRegistry,
-      feeEscrow,
-      taskRegistry,
-      resultVerifier,
-      owner,
-      submitter,
-      miner,
-      miner2,
-      validator,
-      challenger,
-    };
+    return { modelRegistry, minerRegistry, feeEscrow, taskRegistry, owner, router, miner1, miner2, user1, user2 };
   }
 
-  describe("ModelRegistry", function () {
-    it("should register a model", async function () {
-      const { modelRegistry } = await loadFixture(deployInferenceFixture);
+  // ─── ModelRegistry ─────────────────────────────────────────────
 
-      const model = await modelRegistry.getModel("llama-3-70b");
-      expect(model.name).to.equal("Llama 3 70B");
-      expect(model.approved).to.be.true;
+  describe("ModelRegistry", function () {
+    it("Should register models with correct data", async function () {
+      const { modelRegistry } = await loadFixture(deployFixture);
+
+      const model = await modelRegistry.getModel(LLAMA3_8B);
+      expect(model.name).to.equal("llama3-8b");
       expect(model.minTier).to.equal(1);
+      expect(model.baseFee).to.equal(BASE_FEE_8B);
+      expect(model.active).to.be.true;
     });
 
-    it("should reject duplicate model", async function () {
-      const { modelRegistry } = await loadFixture(deployInferenceFixture);
+    it("Should track model count", async function () {
+      const { modelRegistry } = await loadFixture(deployFixture);
+      expect(await modelRegistry.getModelCount()).to.equal(3);
+    });
 
+    it("Should not allow duplicate model registration", async function () {
+      const { modelRegistry } = await loadFixture(deployFixture);
       await expect(
-        modelRegistry.registerModel("llama-3-70b", "Dup", ethers.parseEther("0.01"), 1)
+        modelRegistry.registerModel(LLAMA3_8B, "duplicate", 1, BASE_FEE_8B)
       ).to.be.revertedWithCustomError(modelRegistry, "ModelAlreadyExists");
     });
 
-    it("should reject invalid tier", async function () {
-      const { modelRegistry } = await loadFixture(deployInferenceFixture);
-
+    it("Should reject invalid tier", async function () {
+      const { modelRegistry } = await loadFixture(deployFixture);
+      const id = ethers.id("bad-tier");
       await expect(
-        modelRegistry.registerModel("test", "Test", ethers.parseEther("0.01"), 4)
+        modelRegistry.registerModel(id, "bad", 0, BASE_FEE_8B)
+      ).to.be.revertedWithCustomError(modelRegistry, "InvalidTier");
+      await expect(
+        modelRegistry.registerModel(id, "bad", 4, BASE_FEE_8B)
       ).to.be.revertedWithCustomError(modelRegistry, "InvalidTier");
     });
 
-    it("should revoke and approve model", async function () {
-      const { modelRegistry } = await loadFixture(deployInferenceFixture);
+    it("Should toggle model active status", async function () {
+      const { modelRegistry } = await loadFixture(deployFixture);
 
-      await modelRegistry.revokeModel("llama-3-70b");
-      expect(await modelRegistry.isApproved("llama-3-70b")).to.be.false;
+      await expect(modelRegistry.setModelActive(LLAMA3_8B, false))
+        .to.emit(modelRegistry, "ModelActiveChanged")
+        .withArgs(LLAMA3_8B, false);
 
-      await modelRegistry.approveModel("llama-3-70b");
-      expect(await modelRegistry.isApproved("llama-3-70b")).to.be.true;
+      const model = await modelRegistry.getModel(LLAMA3_8B);
+      expect(model.active).to.be.false;
     });
 
-    it("should update base fee", async function () {
-      const { modelRegistry } = await loadFixture(deployInferenceFixture);
-
-      await modelRegistry.updateBaseFee("llama-3-70b", ethers.parseEther("0.02"));
-      expect(await modelRegistry.getBaseFee("llama-3-70b")).to.equal(
-        ethers.parseEther("0.02")
-      );
-    });
-
-    it("should enumerate models", async function () {
-      const { modelRegistry } = await loadFixture(deployInferenceFixture);
-
-      expect(await modelRegistry.modelCount()).to.equal(1);
-      const model = await modelRegistry.modelAtIndex(0);
-      expect(model.modelId).to.equal("llama-3-70b");
+    it("Should revert on non-owner registration", async function () {
+      const { modelRegistry, user1 } = await loadFixture(deployFixture);
+      await expect(
+        modelRegistry.connect(user1).registerModel(ethers.id("x"), "x", 1, BASE_FEE_8B)
+      ).to.be.revertedWithCustomError(modelRegistry, "OwnableUnauthorizedAccount");
     });
   });
 
+  // ─── MinerRegistry ─────────────────────────────────────────────
+
   describe("MinerRegistry", function () {
-    it("should register a miner with stake", async function () {
-      const { minerRegistry, miner } = await loadFixture(deployInferenceFixture);
+    it("Should register a miner", async function () {
+      const { minerRegistry, miner1 } = await loadFixture(deployFixture);
 
-      await minerRegistry.connect(miner).register("RTX 4090", 2, {
-        value: ethers.parseEther("1"),
-      });
+      await expect(minerRegistry.connect(miner1).registerMiner(2, "https://miner1.example.com"))
+        .to.emit(minerRegistry, "MinerRegistered")
+        .withArgs(miner1.address, 2, "https://miner1.example.com");
 
-      const info = await minerRegistry.getMiner(miner.address);
-      expect(info.gpuModel).to.equal("RTX 4090");
+      const info = await minerRegistry.getMiner(miner1.address);
       expect(info.tier).to.equal(2);
-      expect(info.stake).to.equal(ethers.parseEther("1"));
-      expect(info.status).to.equal(1); // Active
+      expect(info.status).to.equal(1); // Online
+      expect(info.reputation).to.equal(10000);
     });
 
-    it("should reject insufficient stake", async function () {
-      const { minerRegistry, miner } = await loadFixture(deployInferenceFixture);
-
+    it("Should prevent duplicate registration", async function () {
+      const { minerRegistry, miner1 } = await loadFixture(deployFixture);
+      await minerRegistry.connect(miner1).registerMiner(1, "https://m1.example.com");
       await expect(
-        minerRegistry.connect(miner).register("RTX 4090", 2, {
-          value: ethers.parseEther("0.5"),
-        })
-      ).to.be.revertedWithCustomError(minerRegistry, "InsufficientStake");
-    });
-
-    it("should reject duplicate registration", async function () {
-      const { minerRegistry, miner } = await loadFixture(deployInferenceFixture);
-
-      await minerRegistry.connect(miner).register("RTX 4090", 2, {
-        value: ethers.parseEther("1"),
-      });
-      await expect(
-        minerRegistry.connect(miner).register("A100", 3, {
-          value: ethers.parseEther("1"),
-        })
+        minerRegistry.connect(miner1).registerMiner(2, "https://m1.example.com")
       ).to.be.revertedWithCustomError(minerRegistry, "AlreadyRegistered");
     });
 
-    it("should deactivate and reactivate", async function () {
-      const { minerRegistry, miner } = await loadFixture(deployInferenceFixture);
+    it("Should update miner status", async function () {
+      const { minerRegistry, miner1 } = await loadFixture(deployFixture);
+      await minerRegistry.connect(miner1).registerMiner(1, "https://m1.example.com");
 
-      await minerRegistry.connect(miner).register("RTX 4090", 2, {
-        value: ethers.parseEther("1"),
-      });
-
-      await minerRegistry.connect(miner).deactivate();
-      expect((await minerRegistry.getMiner(miner.address)).status).to.equal(0); // Inactive
-
-      await minerRegistry.connect(miner).activate();
-      expect((await minerRegistry.getMiner(miner.address)).status).to.equal(1); // Active
+      await expect(minerRegistry.connect(miner1).updateStatus(0)) // Offline
+        .to.emit(minerRegistry, "MinerStatusUpdated")
+        .withArgs(miner1.address, 0);
     });
 
-    it("should withdraw stake when inactive", async function () {
-      const { minerRegistry, miner } = await loadFixture(deployInferenceFixture);
+    it("Should return miner stats", async function () {
+      const { minerRegistry, miner1 } = await loadFixture(deployFixture);
+      await minerRegistry.connect(miner1).registerMiner(1, "https://m1.example.com");
 
-      await minerRegistry.connect(miner).register("RTX 4090", 2, {
-        value: ethers.parseEther("2"),
-      });
-      await minerRegistry.connect(miner).deactivate();
+      const [completed, failed, reputation] = await minerRegistry.getMinerStats(miner1.address);
+      expect(completed).to.equal(0);
+      expect(failed).to.equal(0);
+      expect(reputation).to.equal(10000);
+    });
 
+    it("Should revert getMinerStats for unregistered miner", async function () {
+      const { minerRegistry, user1 } = await loadFixture(deployFixture);
       await expect(
-        minerRegistry.connect(miner).withdrawStake(ethers.parseEther("1"))
-      ).to.changeEtherBalance(miner, ethers.parseEther("1"));
-    });
-
-    it("should check eligibility", async function () {
-      const { minerRegistry, miner } = await loadFixture(deployInferenceFixture);
-
-      await minerRegistry.connect(miner).register("RTX 4090", 2, {
-        value: ethers.parseEther("1"),
-      });
-
-      expect(await minerRegistry.isEligible(miner.address, 1)).to.be.true;
-      expect(await minerRegistry.isEligible(miner.address, 2)).to.be.true;
-      expect(await minerRegistry.isEligible(miner.address, 3)).to.be.false;
-    });
-
-    it("should slash miner stake", async function () {
-      const { minerRegistry, miner } = await loadFixture(deployInferenceFixture);
-
-      await minerRegistry.connect(miner).register("RTX 4090", 2, {
-        value: ethers.parseEther("2"),
-      });
-
-      await minerRegistry.slash(miner.address, ethers.parseEther("0.5"));
-      expect((await minerRegistry.getMiner(miner.address)).stake).to.equal(
-        ethers.parseEther("1.5")
-      );
+        minerRegistry.getMinerStats(user1.address)
+      ).to.be.revertedWithCustomError(minerRegistry, "NotRegistered");
     });
   });
 
-  describe("TaskRegistry + FeeEscrow", function () {
-    async function setupWithMiner() {
-      const fixture = await loadFixture(deployInferenceFixture);
-      const { minerRegistry, miner } = fixture;
+  // ─── Task Submit ────────────────────────────────────────────────
 
-      // Register miner
-      await minerRegistry.connect(miner).register("RTX 4090", 2, {
-        value: ethers.parseEther("1"),
-      });
-
-      return fixture;
-    }
-
-    it("should submit a task", async function () {
-      const { taskRegistry, submitter } = await setupWithMiner();
+  describe("Task Submission", function () {
+    it("Should submit a task and lock fee", async function () {
+      const { taskRegistry, feeEscrow, user1 } = await loadFixture(deployFixture);
 
       const tx = await taskRegistry
-        .connect(submitter)
-        .submitTask("llama-3-70b", "0x1234", {
-          value: ethers.parseEther("0.01"),
-        });
+        .connect(user1)
+        .submitTask(LLAMA3_8B, INPUT_HASH, BASE_FEE_8B, { value: BASE_FEE_8B });
 
-      await expect(tx)
-        .to.emit(taskRegistry, "TaskSubmitted")
-        .withArgs(0, submitter.address, "llama-3-70b", ethers.parseEther("0.01"));
+      const receipt = await tx.wait();
+      const event = receipt?.logs.find(
+        (log: any) => log.fragment?.name === "TaskSubmitted"
+      ) as any;
+      expect(event).to.not.be.undefined;
 
-      const task = await taskRegistry.getTask(0);
-      expect(task.submitter).to.equal(submitter.address);
-      expect(task.status).to.equal(0); // Pending
+      // Verify escrow balance
+      expect(await ethers.provider.getBalance(await feeEscrow.getAddress()))
+        .to.equal(BASE_FEE_8B);
+
+      // Verify open tasks
+      const openTasks = await taskRegistry.getOpenTasks();
+      expect(openTasks.length).to.equal(1);
     });
 
-    it("should reject task with unapproved model", async function () {
-      const { taskRegistry, submitter } = await setupWithMiner();
+    it("Should reject submission with insufficient fee", async function () {
+      const { taskRegistry, user1 } = await loadFixture(deployFixture);
+      const lowFee = ethers.parseEther("0.001");
 
       await expect(
-        taskRegistry.connect(submitter).submitTask("unknown-model", "0x1234", {
-          value: ethers.parseEther("0.01"),
-        })
-      ).to.be.revertedWithCustomError(taskRegistry, "ModelNotApproved");
+        taskRegistry.connect(user1).submitTask(LLAMA3_8B, INPUT_HASH, lowFee, { value: lowFee })
+      ).to.be.revertedWithCustomError(taskRegistry, "InsufficientFee");
     });
 
-    it("should reject task with insufficient fee", async function () {
-      const { taskRegistry, submitter } = await setupWithMiner();
+    it("Should reject submission for inactive model", async function () {
+      const { modelRegistry, taskRegistry, user1 } = await loadFixture(deployFixture);
+      await modelRegistry.setModelActive(LLAMA3_8B, false);
 
       await expect(
-        taskRegistry.connect(submitter).submitTask("llama-3-70b", "0x1234", {
-          value: ethers.parseEther("0.005"),
-        })
-      ).to.be.revertedWithCustomError(taskRegistry, "FeeBelowMinimum");
-    });
-
-    it("should claim and complete a task", async function () {
-      const { taskRegistry, submitter, miner } = await setupWithMiner();
-
-      // Submit
-      await taskRegistry.connect(submitter).submitTask("llama-3-70b", "0x1234", {
-        value: ethers.parseEther("0.01"),
-      });
-
-      // Claim
-      await taskRegistry.connect(miner).claimTask(0);
-      const claimed = await taskRegistry.getTask(0);
-      expect(claimed.status).to.equal(1); // Claimed
-      expect(claimed.miner).to.equal(miner.address);
-
-      // Complete
-      await taskRegistry.connect(miner).completeTask(0, "0xaabbccdd");
-      const completed = await taskRegistry.getTask(0);
-      expect(completed.status).to.equal(2); // Completed
-    });
-
-    it("should pay miner on completion (minus protocol fee)", async function () {
-      const { taskRegistry, submitter, miner, owner } = await setupWithMiner();
-
-      await taskRegistry.connect(submitter).submitTask("llama-3-70b", "0x1234", {
-        value: ethers.parseEther("1"),
-      });
-      await taskRegistry.connect(miner).claimTask(0);
-
-      // 2.5% fee = 0.025 ETH, miner gets 0.975 ETH
-      await expect(
-        taskRegistry.connect(miner).completeTask(0, "0xaabbccdd")
-      ).to.changeEtherBalances(
-        [miner, owner],
-        [ethers.parseEther("0.975"), ethers.parseEther("0.025")]
-      );
-    });
-
-    it("should cancel a pending task and refund", async function () {
-      const { taskRegistry, submitter } = await setupWithMiner();
-
-      await taskRegistry.connect(submitter).submitTask("llama-3-70b", "0x1234", {
-        value: ethers.parseEther("0.5"),
-      });
-
-      await expect(
-        taskRegistry.connect(submitter).cancelTask(0)
-      ).to.changeEtherBalance(submitter, ethers.parseEther("0.5"));
-
-      const task = await taskRegistry.getTask(0);
-      expect(task.status).to.equal(4); // Cancelled
-    });
-
-    it("should fail a claimed task and refund submitter", async function () {
-      const { taskRegistry, submitter, miner, owner } = await setupWithMiner();
-
-      await taskRegistry.connect(submitter).submitTask("llama-3-70b", "0x1234", {
-        value: ethers.parseEther("0.5"),
-      });
-      await taskRegistry.connect(miner).claimTask(0);
-
-      await expect(
-        taskRegistry.connect(owner).failTask(0, "miner timeout")
-      ).to.changeEtherBalance(submitter, ethers.parseEther("0.5"));
-
-      const task = await taskRegistry.getTask(0);
-      expect(task.status).to.equal(3); // Failed
-    });
-
-    it("should reject claim from ineligible miner", async function () {
-      const { taskRegistry, submitter, miner2, modelRegistry } = await setupWithMiner();
-
-      // Register a model requiring tier 3
-      await modelRegistry.registerModel("big-model", "Big", ethers.parseEther("0.01"), 3);
-
-      await taskRegistry.connect(submitter).submitTask("big-model", "0x1234", {
-        value: ethers.parseEther("0.01"),
-      });
-
-      // miner2 is not registered at all
-      await expect(
-        taskRegistry.connect(miner2).claimTask(0)
-      ).to.be.revertedWithCustomError(taskRegistry, "MinerNotEligible");
-    });
-
-    it("should reject completion after timeout", async function () {
-      const { taskRegistry, submitter, miner } = await setupWithMiner();
-
-      await taskRegistry.connect(submitter).submitTask("llama-3-70b", "0x1234", {
-        value: ethers.parseEther("0.01"),
-      });
-      await taskRegistry.connect(miner).claimTask(0);
-
-      // Advance time past claim timeout (600s)
-      await time.increase(601);
-
-      await expect(
-        taskRegistry.connect(miner).completeTask(0, "0xaabbccdd")
-      ).to.be.revertedWithCustomError(taskRegistry, "ClaimExpired");
+        taskRegistry.connect(user1).submitTask(LLAMA3_8B, INPUT_HASH, BASE_FEE_8B, { value: BASE_FEE_8B })
+      ).to.be.revertedWithCustomError(taskRegistry, "ModelNotActive");
     });
   });
 
-  describe("ResultVerifier", function () {
-    async function setupCompletedTask() {
-      const fixture = await loadFixture(deployInferenceFixture);
-      const { minerRegistry, taskRegistry, resultVerifier, miner, submitter, validator, owner } =
-        fixture;
+  // ─── Task Assignment ────────────────────────────────────────────
 
-      // Register miner
-      await minerRegistry.connect(miner).register("RTX 4090", 2, {
-        value: ethers.parseEther("2"),
-      });
+  describe("Task Assignment", function () {
+    async function submitAndRegisterFixture() {
+      const fixture = await deployFixture();
+      const { taskRegistry, minerRegistry, miner1, user1, router } = fixture;
 
-      // Submit and complete task
-      await taskRegistry.connect(submitter).submitTask("llama-3-70b", "0x1234", {
-        value: ethers.parseEther("0.5"),
-      });
-      await taskRegistry.connect(miner).claimTask(0);
-      await taskRegistry.connect(miner).completeTask(0, "0xaabbccdd");
+      // Register miner (tier 2 — eligible for tier 1 and 2 models)
+      await minerRegistry.connect(miner1).registerMiner(2, "https://miner1.example.com");
 
-      // Add validator
-      await resultVerifier.addValidator(validator.address);
+      // Submit task
+      const tx = await taskRegistry
+        .connect(user1)
+        .submitTask(LLAMA3_8B, INPUT_HASH, BASE_FEE_8B, { value: BASE_FEE_8B });
+      const receipt = await tx.wait();
+      const event = receipt?.logs.find(
+        (log: any) => log.fragment?.name === "TaskSubmitted"
+      ) as any;
+      const taskId = event.args[0];
 
-      return fixture;
+      return { ...fixture, taskId };
     }
 
-    it("should create a challenge", async function () {
-      const { resultVerifier, challenger } = await setupCompletedTask();
+    it("Should assign a task to an eligible miner", async function () {
+      const { taskRegistry, router, miner1, taskId } = await loadFixture(submitAndRegisterFixture);
 
-      const tx = await resultVerifier
-        .connect(challenger)
-        .challenge(0, "wrong output", { value: ethers.parseEther("0.1") });
+      await expect(taskRegistry.connect(router).assignTask(taskId, miner1.address))
+        .to.emit(taskRegistry, "TaskAssigned")
+        .withArgs(taskId, miner1.address);
 
-      await expect(tx).to.emit(resultVerifier, "ChallengeCreated").withArgs(1, 0, challenger.address);
+      const task = await taskRegistry.tasks(taskId);
+      expect(task.status).to.equal(1); // Assigned
+      expect(task.miner).to.equal(miner1.address);
 
-      const ch = await resultVerifier.getChallenge(1);
-      expect(ch.taskId).to.equal(0);
-      expect(ch.status).to.equal(0); // Open
+      // Removed from open tasks
+      const openTasks = await taskRegistry.getOpenTasks();
+      expect(openTasks.length).to.equal(0);
     });
 
-    it("should reject challenge with insufficient stake", async function () {
-      const { resultVerifier, challenger } = await setupCompletedTask();
+    it("Should reject assignment from non-router", async function () {
+      const { taskRegistry, user1, miner1, taskId } = await loadFixture(submitAndRegisterFixture);
 
       await expect(
-        resultVerifier.connect(challenger).challenge(0, "wrong", {
-          value: ethers.parseEther("0.05"),
-        })
-      ).to.be.revertedWithCustomError(resultVerifier, "InsufficientStake");
+        taskRegistry.connect(user1).assignTask(taskId, miner1.address)
+      ).to.be.revertedWithCustomError(taskRegistry, "OnlyRouter");
     });
 
-    it("should reject challenge after window", async function () {
-      const { resultVerifier, challenger } = await setupCompletedTask();
+    it("Should reject assignment of ineligible miner", async function () {
+      const { taskRegistry, minerRegistry, miner2, router, user1 } = await loadFixture(deployFixture);
 
-      await time.increase(601);
+      // Register miner2 as tier 1
+      await minerRegistry.connect(miner2).registerMiner(1, "https://miner2.example.com");
+
+      // Submit task requiring tier 2
+      const tx = await taskRegistry
+        .connect(user1)
+        .submitTask(LLAMA3_70B, INPUT_HASH, BASE_FEE_70B, { value: BASE_FEE_70B });
+      const receipt = await tx.wait();
+      const event = receipt?.logs.find(
+        (log: any) => log.fragment?.name === "TaskSubmitted"
+      ) as any;
+      const taskId = event.args[0];
 
       await expect(
-        resultVerifier.connect(challenger).challenge(0, "too late", {
-          value: ethers.parseEther("0.1"),
-        })
-      ).to.be.revertedWithCustomError(resultVerifier, "ChallengeWindowClosed");
+        taskRegistry.connect(router).assignTask(taskId, miner2.address)
+      ).to.be.revertedWithCustomError(taskRegistry, "MinerNotEligible");
+    });
+  });
+
+  // ─── Task Completion & Fee Release ──────────────────────────────
+
+  describe("Task Completion", function () {
+    async function assignedTaskFixture() {
+      const fixture = await deployFixture();
+      const { taskRegistry, minerRegistry, miner1, user1, router } = fixture;
+
+      await minerRegistry.connect(miner1).registerMiner(2, "https://miner1.example.com");
+
+      const tx = await taskRegistry
+        .connect(user1)
+        .submitTask(LLAMA3_8B, INPUT_HASH, BASE_FEE_8B, { value: BASE_FEE_8B });
+      const receipt = await tx.wait();
+      const event = receipt?.logs.find(
+        (log: any) => log.fragment?.name === "TaskSubmitted"
+      ) as any;
+      const taskId = event.args[0];
+
+      await taskRegistry.connect(router).assignTask(taskId, miner1.address);
+
+      return { ...fixture, taskId };
+    }
+
+    it("Should complete task and release fee to miner", async function () {
+      const { taskRegistry, feeEscrow, miner1, taskId } = await loadFixture(assignedTaskFixture);
+
+      const minerBalanceBefore = await ethers.provider.getBalance(miner1.address);
+
+      const tx = await taskRegistry.connect(miner1).submitResult(taskId, RESULT_HASH, PROOF);
+      const receipt = await tx.wait();
+      const gasUsed = receipt!.gasUsed * receipt!.gasPrice;
+
+      const minerBalanceAfter = await ethers.provider.getBalance(miner1.address);
+
+      // Miner should receive 95% of fee (5% protocol fee)
+      const expectedPayout = (BASE_FEE_8B * 9500n) / 10000n;
+      expect(minerBalanceAfter - minerBalanceBefore + gasUsed).to.equal(expectedPayout);
+
+      // Task should be completed
+      const task = await taskRegistry.tasks(taskId);
+      expect(task.status).to.equal(2); // Completed
+      expect(task.resultHash).to.equal(RESULT_HASH);
+      expect(task.proof).to.equal(PROOF);
+
+      // Protocol fees accumulated
+      expect(await feeEscrow.protocolFees()).to.equal((BASE_FEE_8B * 500n) / 10000n);
     });
 
-    it("should allow validator voting", async function () {
-      const { resultVerifier, challenger, validator } = await setupCompletedTask();
+    it("Should update miner stats on completion", async function () {
+      const { taskRegistry, minerRegistry, miner1, taskId } = await loadFixture(assignedTaskFixture);
 
-      await resultVerifier
-        .connect(challenger)
-        .challenge(0, "wrong", { value: ethers.parseEther("0.1") });
+      await taskRegistry.connect(miner1).submitResult(taskId, RESULT_HASH, PROOF);
 
-      await expect(resultVerifier.connect(validator).vote(1, true))
-        .to.emit(resultVerifier, "VoteCast")
-        .withArgs(1, validator.address, true);
+      const [completed, failed, reputation] = await minerRegistry.getMinerStats(miner1.address);
+      expect(completed).to.equal(1);
+      expect(failed).to.equal(0);
+      expect(reputation).to.equal(10000);
     });
 
-    it("should reject non-validator votes", async function () {
-      const { resultVerifier, challenger, submitter } = await setupCompletedTask();
+    it("Should reject result from non-assigned miner", async function () {
+      const { taskRegistry, minerRegistry, miner2, taskId } = await loadFixture(assignedTaskFixture);
 
-      await resultVerifier
-        .connect(challenger)
-        .challenge(0, "wrong", { value: ethers.parseEther("0.1") });
+      await minerRegistry.connect(miner2).registerMiner(2, "https://miner2.example.com");
 
       await expect(
-        resultVerifier.connect(submitter).vote(1, true)
-      ).to.be.revertedWithCustomError(resultVerifier, "NotValidator");
+        taskRegistry.connect(miner2).submitResult(taskId, RESULT_HASH, PROOF)
+      ).to.be.revertedWithCustomError(taskRegistry, "OnlyAssignedMiner");
+    });
+  });
+
+  // ─── Task Cancellation & Refund ─────────────────────────────────
+
+  describe("Task Cancellation", function () {
+    async function pendingTaskFixture() {
+      const fixture = await deployFixture();
+      const { taskRegistry, user1 } = fixture;
+
+      const tx = await taskRegistry
+        .connect(user1)
+        .submitTask(LLAMA3_8B, INPUT_HASH, BASE_FEE_8B, { value: BASE_FEE_8B });
+      const receipt = await tx.wait();
+      const event = receipt?.logs.find(
+        (log: any) => log.fragment?.name === "TaskSubmitted"
+      ) as any;
+      const taskId = event.args[0];
+
+      return { ...fixture, taskId };
+    }
+
+    it("Should cancel a pending task and refund fee", async function () {
+      const { taskRegistry, user1, taskId } = await loadFixture(pendingTaskFixture);
+
+      const balanceBefore = await ethers.provider.getBalance(user1.address);
+
+      const tx = await taskRegistry.connect(user1).cancelTask(taskId);
+      const receipt = await tx.wait();
+      const gasUsed = receipt!.gasUsed * receipt!.gasPrice;
+
+      const balanceAfter = await ethers.provider.getBalance(user1.address);
+
+      // User should get full refund minus gas
+      expect(balanceAfter - balanceBefore + gasUsed).to.equal(BASE_FEE_8B);
+
+      // Task should be cancelled
+      const task = await taskRegistry.tasks(taskId);
+      expect(task.status).to.equal(4); // Cancelled
+
+      // Removed from open tasks
+      const openTasks = await taskRegistry.getOpenTasks();
+      expect(openTasks.length).to.equal(0);
     });
 
-    it("should reject duplicate votes", async function () {
-      const { resultVerifier, challenger, validator } = await setupCompletedTask();
+    it("Should reject cancel from non-submitter", async function () {
+      const { taskRegistry, user2, taskId } = await loadFixture(pendingTaskFixture);
 
-      await resultVerifier
-        .connect(challenger)
-        .challenge(0, "wrong", { value: ethers.parseEther("0.1") });
-
-      await resultVerifier.connect(validator).vote(1, true);
       await expect(
-        resultVerifier.connect(validator).vote(1, true)
-      ).to.be.revertedWithCustomError(resultVerifier, "AlreadyVoted");
+        taskRegistry.connect(user2).cancelTask(taskId)
+      ).to.be.revertedWithCustomError(taskRegistry, "OnlySubmitter");
     });
 
-    it("should resolve upheld challenge (slash miner)", async function () {
-      const { resultVerifier, minerRegistry, challenger, validator, miner, owner } =
-        await setupCompletedTask();
+    it("Should reject cancel of non-pending task", async function () {
+      const { taskRegistry, minerRegistry, miner1, router, user1, taskId } =
+        await loadFixture(pendingTaskFixture);
 
-      await resultVerifier
-        .connect(challenger)
-        .challenge(0, "wrong", { value: ethers.parseEther("0.1") });
+      await minerRegistry.connect(miner1).registerMiner(2, "https://m1.example.com");
+      await taskRegistry.connect(router).assignTask(taskId, miner1.address);
 
-      await resultVerifier.connect(validator).vote(1, true); // uphold
+      await expect(
+        taskRegistry.connect(user1).cancelTask(taskId)
+      ).to.be.revertedWithCustomError(taskRegistry, "InvalidStatus");
+    });
+  });
 
-      await resultVerifier.connect(owner).resolve(1);
+  // ─── FeeEscrow Protocol Fees ────────────────────────────────────
 
-      const ch = await resultVerifier.getChallenge(1);
-      expect(ch.status).to.equal(1); // Upheld
+  describe("Protocol Fees", function () {
+    it("Should allow owner to claim protocol fees", async function () {
+      const fixture = await deployFixture();
+      const { taskRegistry, minerRegistry, feeEscrow, miner1, user1, router, owner } = fixture;
 
-      // Miner should have been slashed 0.5 ETH
-      const minerInfo = await minerRegistry.getMiner(miner.address);
-      expect(minerInfo.stake).to.equal(ethers.parseEther("1.5"));
+      // Complete a task to generate protocol fees
+      await minerRegistry.connect(miner1).registerMiner(2, "https://m1.example.com");
+      const tx = await taskRegistry
+        .connect(user1)
+        .submitTask(LLAMA3_8B, INPUT_HASH, BASE_FEE_8B, { value: BASE_FEE_8B });
+      const receipt = await tx.wait();
+      const event = receipt?.logs.find(
+        (log: any) => log.fragment?.name === "TaskSubmitted"
+      ) as any;
+      const taskId = event.args[0];
+
+      await taskRegistry.connect(router).assignTask(taskId, miner1.address);
+      await taskRegistry.connect(miner1).submitResult(taskId, RESULT_HASH, PROOF);
+
+      const expectedProtocolFee = (BASE_FEE_8B * 500n) / 10000n;
+      expect(await feeEscrow.protocolFees()).to.equal(expectedProtocolFee);
+
+      // Claim
+      const balanceBefore = await ethers.provider.getBalance(owner.address);
+      const claimTx = await feeEscrow.connect(owner).claimProtocolFees();
+      const claimReceipt = await claimTx.wait();
+      const gasUsed = claimReceipt!.gasUsed * claimReceipt!.gasPrice;
+      const balanceAfter = await ethers.provider.getBalance(owner.address);
+
+      expect(balanceAfter - balanceBefore + gasUsed).to.equal(expectedProtocolFee);
+      expect(await feeEscrow.protocolFees()).to.equal(0);
     });
 
-    it("should resolve rejected challenge", async function () {
-      const { resultVerifier, challenger, validator, owner } = await setupCompletedTask();
-
-      await resultVerifier
-        .connect(challenger)
-        .challenge(0, "wrong", { value: ethers.parseEther("0.1") });
-
-      await resultVerifier.connect(validator).vote(1, false); // reject
-
-      await resultVerifier.connect(owner).resolve(1);
-
-      const ch = await resultVerifier.getChallenge(1);
-      expect(ch.status).to.equal(2); // Rejected
+    it("Should revert claim when no protocol fees", async function () {
+      const { feeEscrow } = await loadFixture(deployFixture);
+      await expect(
+        feeEscrow.claimProtocolFees()
+      ).to.be.revertedWithCustomError(feeEscrow, "NoProtocolFees");
     });
   });
 });

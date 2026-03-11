@@ -5,185 +5,159 @@ import "@openzeppelin/contracts/access/Ownable.sol";
 
 /**
  * @title MinerRegistry
- * @notice GPU miner registration and tier system for QFC inference network.
- *         Miners register with hardware specs and are assigned tiers (1-3)
- *         based on GPU capability class.
+ * @notice Registry for GPU miners participating in the QFC Inference Marketplace.
+ * @dev Miners self-register with a tier and endpoint. The TaskRegistry updates
+ *      stats when tasks are completed or failed.
+ *      Tiers: 1 = small (<7B), 2 = medium (7B-30B), 3 = large (30B+).
  */
 contract MinerRegistry is Ownable {
-    enum MinerStatus { Inactive, Active, Suspended }
+    enum Status { Offline, Online, Busy }
 
     struct Miner {
-        address minerAddress;
-        string gpuModel;       // e.g. "RTX 4090", "A100"
-        uint8 tier;            // 1 = consumer, 2 = prosumer, 3 = datacenter
-        uint256 stake;         // staked QFC for slashing
-        MinerStatus status;
-        uint256 tasksCompleted;
-        uint256 tasksFailed;
-        uint256 registeredAt;
-        uint256 lastActiveAt;
+        uint8 tier;
+        string endpoint;
+        Status status;
+        uint256 completed;
+        uint256 failed;
+        uint256 reputation; // 0-10000 basis points
+        bool registered;
     }
 
-    uint256 public minStake;
-
-    /// @dev miner address => Miner
+    /// @notice Address => Miner info
     mapping(address => Miner) private _miners;
-    address[] private _minerList;
-    /// @dev authorized callers (TaskRegistry, ResultVerifier)
-    mapping(address => bool) public authorizedCallers;
 
-    event MinerRegistered(address indexed miner, string gpuModel, uint8 tier);
-    event MinerActivated(address indexed miner);
-    event MinerDeactivated(address indexed miner);
-    event MinerSuspended(address indexed miner, string reason);
-    event MinerStakeUpdated(address indexed miner, uint256 newStake);
-    event MinerSlashed(address indexed miner, uint256 amount);
-    event MinStakeUpdated(uint256 newMinStake);
-    event CallerAuthorized(address indexed caller);
-    event CallerRevoked(address indexed caller);
+    /// @notice All registered miner addresses
+    address[] public minerAddresses;
+
+    /// @notice TaskRegistry address, authorized to update miner stats
+    address public taskRegistry;
+
+    event MinerRegistered(address indexed miner, uint8 tier, string endpoint);
+    event MinerStatusUpdated(address indexed miner, Status status);
+    event MinerStatsUpdated(address indexed miner, uint256 completed, uint256 failed, uint256 reputation);
+    event TaskRegistrySet(address indexed taskRegistry);
 
     error AlreadyRegistered();
     error NotRegistered();
-    error InsufficientStake(uint256 required, uint256 provided);
     error InvalidTier(uint8 tier);
-    error MinerNotActive();
-    error NothingToWithdraw();
-    error NotAuthorized();
+    error OnlyTaskRegistry();
 
-    modifier onlyAuthorized() {
-        if (!authorizedCallers[msg.sender] && msg.sender != owner()) revert NotAuthorized();
+    modifier onlyTaskRegistry() {
+        if (msg.sender != taskRegistry) revert OnlyTaskRegistry();
         _;
     }
 
-    constructor(uint256 _minStake) Ownable(msg.sender) {
-        minStake = _minStake;
+    constructor() Ownable(msg.sender) {}
+
+    /**
+     * @notice Set the TaskRegistry address. Can only be called once by owner.
+     * @param _taskRegistry Address of the TaskRegistry contract.
+     */
+    function setTaskRegistry(address _taskRegistry) external onlyOwner {
+        require(_taskRegistry != address(0), "Zero address");
+        taskRegistry = _taskRegistry;
+        emit TaskRegistrySet(_taskRegistry);
     }
 
-    /// @notice Authorize a caller (TaskRegistry, ResultVerifier)
-    function authorizeCaller(address caller) external onlyOwner {
-        authorizedCallers[caller] = true;
-        emit CallerAuthorized(caller);
-    }
-
-    /// @notice Revoke a caller's authorization
-    function revokeCaller(address caller) external onlyOwner {
-        authorizedCallers[caller] = false;
-        emit CallerRevoked(caller);
-    }
-
-    /// @notice Register as a miner with GPU specs and stake
-    /// @param gpuModel GPU model string
-    /// @param tier Miner tier (1-3)
-    function register(string calldata gpuModel, uint8 tier) external payable {
-        if (_miners[msg.sender].registeredAt != 0) revert AlreadyRegistered();
+    /**
+     * @notice Register as a miner with GPU tier and endpoint.
+     * @param tier GPU capability tier (1-3).
+     * @param endpoint Off-chain inference endpoint URL.
+     */
+    function registerMiner(uint8 tier, string calldata endpoint) external {
+        if (_miners[msg.sender].registered) revert AlreadyRegistered();
         if (tier == 0 || tier > 3) revert InvalidTier(tier);
-        if (msg.value < minStake) revert InsufficientStake(minStake, msg.value);
 
         _miners[msg.sender] = Miner({
-            minerAddress: msg.sender,
-            gpuModel: gpuModel,
             tier: tier,
-            stake: msg.value,
-            status: MinerStatus.Active,
-            tasksCompleted: 0,
-            tasksFailed: 0,
-            registeredAt: block.timestamp,
-            lastActiveAt: block.timestamp
+            endpoint: endpoint,
+            status: Status.Online,
+            completed: 0,
+            failed: 0,
+            reputation: 10000, // start at 100%
+            registered: true
         });
-        _minerList.push(msg.sender);
+        minerAddresses.push(msg.sender);
 
-        emit MinerRegistered(msg.sender, gpuModel, tier);
-        emit MinerActivated(msg.sender);
+        emit MinerRegistered(msg.sender, tier, endpoint);
     }
 
-    /// @notice Add more stake
-    function addStake() external payable {
-        if (_miners[msg.sender].registeredAt == 0) revert NotRegistered();
-        _miners[msg.sender].stake += msg.value;
-        emit MinerStakeUpdated(msg.sender, _miners[msg.sender].stake);
+    /**
+     * @notice Update miner availability status.
+     * @param status New status (Online, Busy, Offline).
+     */
+    function updateStatus(Status status) external {
+        if (!_miners[msg.sender].registered) revert NotRegistered();
+        _miners[msg.sender].status = status;
+        emit MinerStatusUpdated(msg.sender, status);
     }
 
-    /// @notice Deactivate self (must withdraw stake separately)
-    function deactivate() external {
-        Miner storage m = _miners[msg.sender];
-        if (m.registeredAt == 0) revert NotRegistered();
-        m.status = MinerStatus.Inactive;
-        emit MinerDeactivated(msg.sender);
-    }
-
-    /// @notice Reactivate after deactivation
-    function activate() external {
-        Miner storage m = _miners[msg.sender];
-        if (m.registeredAt == 0) revert NotRegistered();
-        if (m.stake < minStake) revert InsufficientStake(minStake, m.stake);
-        m.status = MinerStatus.Active;
-        m.lastActiveAt = block.timestamp;
-        emit MinerActivated(msg.sender);
-    }
-
-    /// @notice Withdraw stake (only when inactive)
-    function withdrawStake(uint256 amount) external {
-        Miner storage m = _miners[msg.sender];
-        if (m.registeredAt == 0) revert NotRegistered();
-        if (m.status == MinerStatus.Active) revert MinerNotActive();
-        if (amount == 0 || amount > m.stake) revert NothingToWithdraw();
-        m.stake -= amount;
-        payable(msg.sender).transfer(amount);
-        emit MinerStakeUpdated(msg.sender, m.stake);
-    }
-
-    /// @notice Suspend a miner (admin only)
-    function suspendMiner(address miner, string calldata reason) external onlyOwner {
-        if (_miners[miner].registeredAt == 0) revert NotRegistered();
-        _miners[miner].status = MinerStatus.Suspended;
-        emit MinerSuspended(miner, reason);
-    }
-
-    /// @notice Slash a miner's stake (called by ResultVerifier)
-    function slash(address miner, uint256 amount) external onlyAuthorized {
+    /**
+     * @notice Record a completed task for a miner. Called by TaskRegistry.
+     * @param miner The miner address.
+     */
+    function recordCompletion(address miner) external onlyTaskRegistry {
         Miner storage m = _miners[miner];
-        if (m.registeredAt == 0) revert NotRegistered();
-        uint256 slashAmount = amount > m.stake ? m.stake : amount;
-        m.stake -= slashAmount;
-        emit MinerSlashed(miner, slashAmount);
+        m.completed++;
+        _updateReputation(m);
+        emit MinerStatsUpdated(miner, m.completed, m.failed, m.reputation);
     }
 
-    /// @notice Record task completion (called by TaskRegistry)
-    function recordTaskCompleted(address miner) external onlyAuthorized {
-        _miners[miner].tasksCompleted++;
-        _miners[miner].lastActiveAt = block.timestamp;
-    }
-
-    /// @notice Record task failure (called by ResultVerifier)
-    function recordTaskFailed(address miner) external onlyAuthorized {
-        _miners[miner].tasksFailed++;
-    }
-
-    /// @notice Update minimum stake requirement
-    function setMinStake(uint256 _minStake) external onlyOwner {
-        minStake = _minStake;
-        emit MinStakeUpdated(_minStake);
-    }
-
-    /// @notice Check if miner is active and meets tier requirement
-    function isEligible(address miner, uint8 requiredTier) external view returns (bool) {
+    /**
+     * @notice Record a failed task for a miner. Called by TaskRegistry.
+     * @param miner The miner address.
+     */
+    function recordFailure(address miner) external onlyTaskRegistry {
         Miner storage m = _miners[miner];
-        return m.status == MinerStatus.Active && m.tier >= requiredTier;
+        m.failed++;
+        _updateReputation(m);
+        emit MinerStatsUpdated(miner, m.completed, m.failed, m.reputation);
     }
 
-    /// @notice Get miner details
-    function getMiner(address miner) external view returns (Miner memory) {
-        if (_miners[miner].registeredAt == 0) revert NotRegistered();
+    /**
+     * @notice Get miner stats.
+     * @param miner The miner address.
+     * @return completed Number of completed tasks.
+     * @return failed Number of failed tasks.
+     * @return reputation Reputation score (0-10000).
+     */
+    function getMinerStats(address miner)
+        external
+        view
+        returns (uint256 completed, uint256 failed, uint256 reputation)
+    {
+        if (!_miners[miner].registered) revert NotRegistered();
+        Miner storage m = _miners[miner];
+        return (m.completed, m.failed, m.reputation);
+    }
+
+    /**
+     * @notice Get full miner info.
+     * @param miner The miner address.
+     * @return info The Miner struct.
+     */
+    function getMiner(address miner) external view returns (Miner memory info) {
+        if (!_miners[miner].registered) revert NotRegistered();
         return _miners[miner];
     }
 
-    /// @notice Total registered miners
-    function minerCount() external view returns (uint256) {
-        return _minerList.length;
+    /**
+     * @notice Get total number of registered miners.
+     * @return count Miner count.
+     */
+    function getMinerCount() external view returns (uint256 count) {
+        return minerAddresses.length;
     }
 
-    /// @notice Get miner address by index
-    function minerAtIndex(uint256 index) external view returns (address) {
-        return _minerList[index];
+    /**
+     * @dev Recalculate reputation as completed / total * 10000.
+     */
+    function _updateReputation(Miner storage m) internal {
+        uint256 total = m.completed + m.failed;
+        if (total == 0) {
+            m.reputation = 10000;
+        } else {
+            m.reputation = (m.completed * 10000) / total;
+        }
     }
 }

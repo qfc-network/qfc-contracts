@@ -6,121 +6,128 @@ import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 
 /**
  * @title FeeEscrow
- * @notice Locks QFC fees when inference tasks are submitted.
- *         Releases payment to miners on completion, refunds submitters on failure/cancellation.
- *         Designed to be called by TaskRegistry.
+ * @notice Escrow contract for inference task fees on the QFC Marketplace.
+ * @dev Holds fees in escrow until a task is completed or cancelled.
+ *      Charges a 5% protocol fee on successful completions.
  */
 contract FeeEscrow is Ownable, ReentrancyGuard {
     struct Escrow {
         address submitter;
-        address miner;
         uint256 amount;
         bool settled;
     }
 
-    /// @dev taskId => Escrow
-    mapping(uint256 => Escrow) private _escrows;
+    /// @notice Task ID => Escrow info
+    mapping(bytes32 => Escrow) public escrows;
 
-    uint256 public totalLocked;
-    uint256 public protocolFeeBps; // basis points (e.g. 250 = 2.5%)
-    address public protocolFeeRecipient;
+    /// @notice Accumulated protocol fees available for withdrawal
+    uint256 public protocolFees;
 
-    event Deposited(uint256 indexed taskId, address indexed submitter, uint256 amount);
-    event Released(uint256 indexed taskId, address indexed miner, uint256 minerAmount, uint256 protocolFee);
-    event Refunded(uint256 indexed taskId, address indexed submitter, uint256 amount);
-    event ProtocolFeeUpdated(uint256 newFeeBps);
-    event FeeRecipientUpdated(address newRecipient);
+    /// @notice Protocol fee in basis points (500 = 5%)
+    uint256 public constant PROTOCOL_FEE_BPS = 500;
 
-    error AlreadyDeposited(uint256 taskId);
-    error NotDeposited(uint256 taskId);
-    error AlreadySettled(uint256 taskId);
-    error InvalidAmount();
-    error FeeTooHigh();
+    /// @notice TaskRegistry address, authorized to lock/release/refund
+    address public taskRegistry;
+
+    event FeeLocked(bytes32 indexed taskId, address indexed submitter, uint256 amount);
+    event FeeReleased(bytes32 indexed taskId, address indexed miner, uint256 minerAmount, uint256 protocolAmount);
+    event FeeRefunded(bytes32 indexed taskId, address indexed submitter, uint256 amount);
+    event ProtocolFeesClaimed(address indexed to, uint256 amount);
+    event TaskRegistrySet(address indexed taskRegistry);
+
+    error OnlyTaskRegistry();
+    error EscrowAlreadyExists(bytes32 taskId);
+    error EscrowNotFound(bytes32 taskId);
+    error EscrowAlreadySettled(bytes32 taskId);
+    error NoProtocolFees();
     error TransferFailed();
 
-    constructor(uint256 _protocolFeeBps, address _feeRecipient) Ownable(msg.sender) {
-        if (_protocolFeeBps > 1000) revert FeeTooHigh(); // max 10%
-        protocolFeeBps = _protocolFeeBps;
-        protocolFeeRecipient = _feeRecipient;
+    modifier onlyTaskRegistry() {
+        if (msg.sender != taskRegistry) revert OnlyTaskRegistry();
+        _;
     }
 
-    /// @notice Lock funds for a task
-    /// @param taskId The task ID
-    /// @param submitter The task submitter address
-    function deposit(uint256 taskId, address submitter) external payable onlyOwner {
-        if (msg.value == 0) revert InvalidAmount();
-        if (_escrows[taskId].amount != 0) revert AlreadyDeposited(taskId);
+    constructor() Ownable(msg.sender) {}
 
-        _escrows[taskId] = Escrow({
+    /**
+     * @notice Set the TaskRegistry address. Only owner.
+     * @param _taskRegistry Address of the TaskRegistry contract.
+     */
+    function setTaskRegistry(address _taskRegistry) external onlyOwner {
+        require(_taskRegistry != address(0), "Zero address");
+        taskRegistry = _taskRegistry;
+        emit TaskRegistrySet(_taskRegistry);
+    }
+
+    /**
+     * @notice Lock fee in escrow for a task. Called by TaskRegistry.
+     * @param taskId Unique task identifier.
+     * @param submitter The task submitter address.
+     */
+    function lockFee(bytes32 taskId, address submitter) external payable onlyTaskRegistry {
+        if (escrows[taskId].amount != 0) revert EscrowAlreadyExists(taskId);
+        require(msg.value > 0, "No fee sent");
+
+        escrows[taskId] = Escrow({
             submitter: submitter,
-            miner: address(0),
             amount: msg.value,
             settled: false
         });
-        totalLocked += msg.value;
 
-        emit Deposited(taskId, submitter, msg.value);
+        emit FeeLocked(taskId, submitter, msg.value);
     }
 
-    /// @notice Release escrowed funds to the miner (minus protocol fee)
-    /// @param taskId The task ID
-    /// @param miner The miner to pay
-    function release(uint256 taskId, address miner) external onlyOwner nonReentrant {
-        Escrow storage e = _escrows[taskId];
-        if (e.amount == 0) revert NotDeposited(taskId);
-        if (e.settled) revert AlreadySettled(taskId);
-
-        e.miner = miner;
-        e.settled = true;
-        totalLocked -= e.amount;
-
-        uint256 fee = (e.amount * protocolFeeBps) / 10000;
-        uint256 minerAmount = e.amount - fee;
-
-        if (fee > 0 && protocolFeeRecipient != address(0)) {
-            (bool feeOk, ) = protocolFeeRecipient.call{value: fee}("");
-            if (!feeOk) revert TransferFailed();
-        } else {
-            minerAmount = e.amount; // no fee if recipient not set
-        }
-
-        (bool ok, ) = miner.call{value: minerAmount}("");
-        if (!ok) revert TransferFailed();
-
-        emit Released(taskId, miner, minerAmount, fee);
-    }
-
-    /// @notice Refund escrowed funds to the submitter
-    /// @param taskId The task ID
-    function refund(uint256 taskId) external onlyOwner nonReentrant {
-        Escrow storage e = _escrows[taskId];
-        if (e.amount == 0) revert NotDeposited(taskId);
-        if (e.settled) revert AlreadySettled(taskId);
+    /**
+     * @notice Release escrowed fee to miner on task completion. 5% protocol fee deducted.
+     * @param taskId The completed task ID.
+     * @param miner Address of the miner to pay.
+     */
+    function releaseFee(bytes32 taskId, address miner) external onlyTaskRegistry nonReentrant {
+        Escrow storage e = escrows[taskId];
+        if (e.amount == 0) revert EscrowNotFound(taskId);
+        if (e.settled) revert EscrowAlreadySettled(taskId);
 
         e.settled = true;
-        totalLocked -= e.amount;
 
-        (bool ok, ) = e.submitter.call{value: e.amount}("");
-        if (!ok) revert TransferFailed();
+        uint256 protocolAmount = (e.amount * PROTOCOL_FEE_BPS) / 10000;
+        uint256 minerAmount = e.amount - protocolAmount;
+        protocolFees += protocolAmount;
 
-        emit Refunded(taskId, e.submitter, e.amount);
+        (bool success, ) = miner.call{value: minerAmount}("");
+        if (!success) revert TransferFailed();
+
+        emit FeeReleased(taskId, miner, minerAmount, protocolAmount);
     }
 
-    /// @notice Get escrow details
-    function getEscrow(uint256 taskId) external view returns (Escrow memory) {
-        return _escrows[taskId];
+    /**
+     * @notice Refund escrowed fee to submitter on task cancel/failure.
+     * @param taskId The cancelled/failed task ID.
+     */
+    function refundFee(bytes32 taskId) external onlyTaskRegistry nonReentrant {
+        Escrow storage e = escrows[taskId];
+        if (e.amount == 0) revert EscrowNotFound(taskId);
+        if (e.settled) revert EscrowAlreadySettled(taskId);
+
+        e.settled = true;
+
+        (bool success, ) = e.submitter.call{value: e.amount}("");
+        if (!success) revert TransferFailed();
+
+        emit FeeRefunded(taskId, e.submitter, e.amount);
     }
 
-    /// @notice Update protocol fee (max 10%)
-    function setProtocolFee(uint256 newFeeBps) external onlyOwner {
-        if (newFeeBps > 1000) revert FeeTooHigh();
-        protocolFeeBps = newFeeBps;
-        emit ProtocolFeeUpdated(newFeeBps);
-    }
+    /**
+     * @notice Withdraw accumulated protocol fees. Only owner.
+     */
+    function claimProtocolFees() external onlyOwner nonReentrant {
+        if (protocolFees == 0) revert NoProtocolFees();
 
-    /// @notice Update fee recipient
-    function setFeeRecipient(address newRecipient) external onlyOwner {
-        protocolFeeRecipient = newRecipient;
-        emit FeeRecipientUpdated(newRecipient);
+        uint256 amount = protocolFees;
+        protocolFees = 0;
+
+        (bool success, ) = msg.sender.call{value: amount}("");
+        if (!success) revert TransferFailed();
+
+        emit ProtocolFeesClaimed(msg.sender, amount);
     }
 }
