@@ -6,7 +6,7 @@ QFC smart contract example library built with Hardhat and Solidity. Provides pro
 
 ## Tech Stack
 
-- **Solidity** ^0.8.20 - Smart contract language
+- **Solidity** ^0.8.24 (Cancun EVM) - Smart contract language
 - **Hardhat** - Development framework
 - **OpenZeppelin** - Security-audited contract libraries
 - **TypeScript** - Scripts and tests
