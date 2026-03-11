@@ -16,8 +16,11 @@ describe("Inference Marketplace", function () {
   const RESULT_HASH = ethers.id("test-result-data");
   const PROOF = ethers.id("test-proof");
 
+  const MIN_CHALLENGE_STAKE = ethers.parseEther("0.1");
+  const CHALLENGER_RESULT = ethers.id("challenger-result-data");
+
   async function deployFixture() {
-    const [owner, router, miner1, miner2, user1, user2] = await ethers.getSigners();
+    const [owner, router, miner1, miner2, user1, user2, validator1, validator2] = await ethers.getSigners();
 
     // Deploy contracts
     const ModelRegistry = await ethers.getContractFactory("ModelRegistry");
@@ -36,8 +39,16 @@ describe("Inference Marketplace", function () {
       await feeEscrow.getAddress()
     );
 
+    const ResultVerifier = await ethers.getContractFactory("ResultVerifier");
+    const resultVerifier = await ResultVerifier.deploy(
+      await taskRegistry.getAddress(),
+      await minerRegistry.getAddress(),
+      MIN_CHALLENGE_STAKE
+    );
+
     // Wire together
     await minerRegistry.setTaskRegistry(await taskRegistry.getAddress());
+    await minerRegistry.setResultVerifier(await resultVerifier.getAddress());
     await feeEscrow.setTaskRegistry(await taskRegistry.getAddress());
     await taskRegistry.setRouter(router.address);
 
@@ -46,7 +57,7 @@ describe("Inference Marketplace", function () {
     await modelRegistry.registerModel(LLAMA3_70B, "llama3-70b", 2, BASE_FEE_70B);
     await modelRegistry.registerModel(WHISPER, "whisper-large-v3", 1, BASE_FEE_WHISPER);
 
-    return { modelRegistry, minerRegistry, feeEscrow, taskRegistry, owner, router, miner1, miner2, user1, user2 };
+    return { modelRegistry, minerRegistry, feeEscrow, taskRegistry, resultVerifier, owner, router, miner1, miner2, user1, user2, validator1, validator2 };
   }
 
   // ─── ModelRegistry ─────────────────────────────────────────────
@@ -441,6 +452,297 @@ describe("Inference Marketplace", function () {
       await expect(
         feeEscrow.claimProtocolFees()
       ).to.be.revertedWithCustomError(feeEscrow, "NoProtocolFees");
+    });
+  });
+
+  // ─── ResultVerifier ──────────────────────────────────────────────
+
+  describe("ResultVerifier", function () {
+    async function completedTaskFixture() {
+      const fixture = await deployFixture();
+      const { taskRegistry, minerRegistry, resultVerifier, miner1, user1, router, owner, validator1, validator2 } = fixture;
+
+      await minerRegistry.connect(miner1).registerMiner(2, "https://miner1.example.com");
+
+      // Submit + assign + complete task
+      const tx = await taskRegistry
+        .connect(user1)
+        .submitTask(LLAMA3_8B, INPUT_HASH, BASE_FEE_8B, { value: BASE_FEE_8B });
+      const receipt = await tx.wait();
+      const event = receipt?.logs.find(
+        (log: any) => log.fragment?.name === "TaskSubmitted"
+      ) as any;
+      const taskId = event.args[0];
+
+      await taskRegistry.connect(router).assignTask(taskId, miner1.address);
+      await taskRegistry.connect(miner1).submitResult(taskId, RESULT_HASH, PROOF);
+
+      // Add validators
+      await resultVerifier.addValidator(validator1.address);
+      await resultVerifier.addValidator(validator2.address);
+
+      return { ...fixture, taskId };
+    }
+
+    it("Should create a challenge on a completed task", async function () {
+      const { resultVerifier, user2, taskId } = await loadFixture(completedTaskFixture);
+
+      await expect(
+        resultVerifier.connect(user2).challengeResult(taskId, CHALLENGER_RESULT, "Wrong output", { value: MIN_CHALLENGE_STAKE })
+      ).to.emit(resultVerifier, "ChallengeCreated")
+        .withArgs(1, taskId, user2.address);
+
+      const challenge = await resultVerifier.getChallenge(1);
+      expect(challenge.taskId).to.equal(taskId);
+      expect(challenge.challenger).to.equal(user2.address);
+      expect(challenge.challengerResultHash).to.equal(CHALLENGER_RESULT);
+      expect(challenge.status).to.equal(0); // Open
+      expect(challenge.stake).to.equal(MIN_CHALLENGE_STAKE);
+    });
+
+    it("Should reject challenge with insufficient stake", async function () {
+      const { resultVerifier, user2, taskId } = await loadFixture(completedTaskFixture);
+      const lowStake = ethers.parseEther("0.01");
+
+      await expect(
+        resultVerifier.connect(user2).challengeResult(taskId, CHALLENGER_RESULT, "Wrong", { value: lowStake })
+      ).to.be.revertedWithCustomError(resultVerifier, "InsufficientStake");
+    });
+
+    it("Should reject challenge on non-completed task", async function () {
+      const { taskRegistry, resultVerifier, user1, user2 } = await loadFixture(deployFixture);
+
+      // Submit but don't complete
+      const tx = await taskRegistry
+        .connect(user1)
+        .submitTask(LLAMA3_8B, INPUT_HASH, BASE_FEE_8B, { value: BASE_FEE_8B });
+      const receipt = await tx.wait();
+      const event = receipt?.logs.find(
+        (log: any) => log.fragment?.name === "TaskSubmitted"
+      ) as any;
+      const taskId = event.args[0];
+
+      await expect(
+        resultVerifier.connect(user2).challengeResult(taskId, CHALLENGER_RESULT, "Wrong", { value: MIN_CHALLENGE_STAKE })
+      ).to.be.revertedWithCustomError(resultVerifier, "TaskNotCompleted");
+    });
+
+    it("Should reject duplicate challenge", async function () {
+      const { resultVerifier, user1, user2, taskId } = await loadFixture(completedTaskFixture);
+
+      await resultVerifier.connect(user1).challengeResult(taskId, CHALLENGER_RESULT, "Wrong 1", { value: MIN_CHALLENGE_STAKE });
+
+      await expect(
+        resultVerifier.connect(user2).challengeResult(taskId, CHALLENGER_RESULT, "Wrong 2", { value: MIN_CHALLENGE_STAKE })
+      ).to.be.revertedWithCustomError(resultVerifier, "AlreadyChallenged");
+    });
+
+    it("Should reject challenge after window closes", async function () {
+      const { resultVerifier, user2, taskId } = await loadFixture(completedTaskFixture);
+
+      // Fast forward past challenge window (600s)
+      await ethers.provider.send("evm_increaseTime", [601]);
+      await ethers.provider.send("evm_mine", []);
+
+      await expect(
+        resultVerifier.connect(user2).challengeResult(taskId, CHALLENGER_RESULT, "Too late", { value: MIN_CHALLENGE_STAKE })
+      ).to.be.revertedWithCustomError(resultVerifier, "ChallengeWindowClosed");
+    });
+
+    it("Should allow validators to vote", async function () {
+      const { resultVerifier, user2, validator1, validator2, taskId } = await loadFixture(completedTaskFixture);
+
+      await resultVerifier.connect(user2).challengeResult(taskId, CHALLENGER_RESULT, "Wrong", { value: MIN_CHALLENGE_STAKE });
+
+      await expect(resultVerifier.connect(validator1).vote(1, true))
+        .to.emit(resultVerifier, "VoteCast")
+        .withArgs(1, validator1.address, true);
+
+      await expect(resultVerifier.connect(validator2).vote(1, false))
+        .to.emit(resultVerifier, "VoteCast")
+        .withArgs(1, validator2.address, false);
+
+      const challenge = await resultVerifier.getChallenge(1);
+      expect(challenge.votesFor).to.equal(1);
+      expect(challenge.votesAgainst).to.equal(1);
+    });
+
+    it("Should reject vote from non-validator", async function () {
+      const { resultVerifier, user1, user2, taskId } = await loadFixture(completedTaskFixture);
+
+      await resultVerifier.connect(user2).challengeResult(taskId, CHALLENGER_RESULT, "Wrong", { value: MIN_CHALLENGE_STAKE });
+
+      await expect(
+        resultVerifier.connect(user1).vote(1, true)
+      ).to.be.revertedWithCustomError(resultVerifier, "NotValidator");
+    });
+
+    it("Should reject duplicate vote", async function () {
+      const { resultVerifier, user2, validator1, taskId } = await loadFixture(completedTaskFixture);
+
+      await resultVerifier.connect(user2).challengeResult(taskId, CHALLENGER_RESULT, "Wrong", { value: MIN_CHALLENGE_STAKE });
+      await resultVerifier.connect(validator1).vote(1, true);
+
+      await expect(
+        resultVerifier.connect(validator1).vote(1, false)
+      ).to.be.revertedWithCustomError(resultVerifier, "AlreadyVoted");
+    });
+
+    it("Should resolve upheld challenge — slash miner, refund challenger", async function () {
+      const { resultVerifier, minerRegistry, user2, validator1, validator2, miner1, taskId } =
+        await loadFixture(completedTaskFixture);
+
+      // File challenge
+      await resultVerifier.connect(user2).challengeResult(taskId, CHALLENGER_RESULT, "Wrong output", { value: MIN_CHALLENGE_STAKE });
+
+      // Validators vote to uphold (2-0)
+      await resultVerifier.connect(validator1).vote(1, true);
+      await resultVerifier.connect(validator2).vote(1, true);
+
+      // Check miner reputation before
+      const [, , repBefore] = await minerRegistry.getMinerStats(miner1.address);
+      expect(repBefore).to.equal(10000);
+
+      // Resolve
+      const challengerBalBefore = await ethers.provider.getBalance(user2.address);
+
+      await expect(resultVerifier.resolveChallenge(1))
+        .to.emit(resultVerifier, "ChallengeResolved")
+        .withArgs(1, 1); // Upheld
+
+      // Miner reputation slashed by 10% (1000 bps)
+      const [completed, failed, repAfter] = await minerRegistry.getMinerStats(miner1.address);
+      expect(failed).to.equal(1);
+      expect(repAfter).to.equal(9000); // 10000 - 10%
+
+      // Challenger refunded
+      const challengerBalAfter = await ethers.provider.getBalance(user2.address);
+      expect(challengerBalAfter - challengerBalBefore).to.equal(MIN_CHALLENGE_STAKE);
+
+      // Challenge is upheld
+      const challenge = await resultVerifier.getChallenge(1);
+      expect(challenge.status).to.equal(1); // Upheld
+    });
+
+    it("Should resolve rejected challenge — challenger loses stake", async function () {
+      const { resultVerifier, minerRegistry, user2, validator1, validator2, miner1, taskId } =
+        await loadFixture(completedTaskFixture);
+
+      await resultVerifier.connect(user2).challengeResult(taskId, CHALLENGER_RESULT, "Wrong", { value: MIN_CHALLENGE_STAKE });
+
+      // Validators vote to reject (0-2)
+      await resultVerifier.connect(validator1).vote(1, false);
+      await resultVerifier.connect(validator2).vote(1, false);
+
+      const challengerBalBefore = await ethers.provider.getBalance(user2.address);
+
+      await expect(resultVerifier.resolveChallenge(1))
+        .to.emit(resultVerifier, "ChallengeResolved")
+        .withArgs(1, 2); // Rejected
+
+      // Miner reputation unchanged
+      const [, , rep] = await minerRegistry.getMinerStats(miner1.address);
+      expect(rep).to.equal(10000);
+
+      // Challenger NOT refunded
+      const challengerBalAfter = await ethers.provider.getBalance(user2.address);
+      expect(challengerBalAfter).to.equal(challengerBalBefore);
+
+      // 50% of stake goes to protocol fees
+      const expectedProtocol = (MIN_CHALLENGE_STAKE * 5000n) / 10000n;
+      expect(await resultVerifier.protocolFees()).to.equal(expectedProtocol);
+    });
+
+    it("Should expire challenge after window with no resolution", async function () {
+      const { resultVerifier, user2, taskId } = await loadFixture(completedTaskFixture);
+
+      await resultVerifier.connect(user2).challengeResult(taskId, CHALLENGER_RESULT, "Wrong", { value: MIN_CHALLENGE_STAKE });
+
+      // Can't expire before window
+      await expect(
+        resultVerifier.expireChallenge(1)
+      ).to.be.revertedWith("Challenge window not expired");
+
+      // Fast forward past window
+      await ethers.provider.send("evm_increaseTime", [601]);
+      await ethers.provider.send("evm_mine", []);
+
+      const balBefore = await ethers.provider.getBalance(user2.address);
+
+      await expect(resultVerifier.expireChallenge(1))
+        .to.emit(resultVerifier, "ChallengeExpired")
+        .withArgs(1);
+
+      // Challenger refunded on expiry
+      const balAfter = await ethers.provider.getBalance(user2.address);
+      expect(balAfter - balBefore).to.equal(MIN_CHALLENGE_STAKE);
+
+      const challenge = await resultVerifier.getChallenge(1);
+      expect(challenge.status).to.equal(3); // Expired
+    });
+
+    it("Should reject resolve from non-owner", async function () {
+      const { resultVerifier, user1, user2, taskId } = await loadFixture(completedTaskFixture);
+
+      await resultVerifier.connect(user2).challengeResult(taskId, CHALLENGER_RESULT, "Wrong", { value: MIN_CHALLENGE_STAKE });
+
+      await expect(
+        resultVerifier.connect(user1).resolveChallenge(1)
+      ).to.be.revertedWithCustomError(resultVerifier, "OwnableUnauthorizedAccount");
+    });
+
+    it("Should allow owner to claim protocol fees from rejected challenges", async function () {
+      const { resultVerifier, owner, user2, validator1, taskId } = await loadFixture(completedTaskFixture);
+
+      await resultVerifier.connect(user2).challengeResult(taskId, CHALLENGER_RESULT, "Wrong", { value: MIN_CHALLENGE_STAKE });
+      await resultVerifier.connect(validator1).vote(1, false);
+      await resultVerifier.resolveChallenge(1);
+
+      const expectedFees = (MIN_CHALLENGE_STAKE * 5000n) / 10000n;
+      const balBefore = await ethers.provider.getBalance(owner.address);
+      const tx = await resultVerifier.claimProtocolFees();
+      const receipt = await tx.wait();
+      const gasUsed = receipt!.gasUsed * receipt!.gasPrice;
+      const balAfter = await ethers.provider.getBalance(owner.address);
+
+      expect(balAfter - balBefore + gasUsed).to.equal(expectedFees);
+      expect(await resultVerifier.protocolFees()).to.equal(0);
+    });
+
+    it("Should allow admin to update challenge window and slash penalty", async function () {
+      const { resultVerifier } = await loadFixture(completedTaskFixture);
+
+      await expect(resultVerifier.setChallengeWindow(1200))
+        .to.emit(resultVerifier, "ChallengeWindowUpdated")
+        .withArgs(1200);
+      expect(await resultVerifier.challengeWindow()).to.equal(1200);
+
+      await expect(resultVerifier.setSlashPenalty(2000))
+        .to.emit(resultVerifier, "SlashPenaltyUpdated")
+        .withArgs(2000);
+      expect(await resultVerifier.slashPenaltyBps()).to.equal(2000);
+    });
+
+    it("Should allow add/remove validators", async function () {
+      const { resultVerifier, user1 } = await loadFixture(completedTaskFixture);
+
+      await expect(resultVerifier.addValidator(user1.address))
+        .to.emit(resultVerifier, "ValidatorAdded")
+        .withArgs(user1.address);
+      expect(await resultVerifier.validators(user1.address)).to.be.true;
+
+      await expect(resultVerifier.removeValidator(user1.address))
+        .to.emit(resultVerifier, "ValidatorRemoved")
+        .withArgs(user1.address);
+      expect(await resultVerifier.validators(user1.address)).to.be.false;
+    });
+
+    it("Should store completedAt timestamp on task", async function () {
+      const { taskRegistry, taskId } = await loadFixture(completedTaskFixture);
+
+      const task = await taskRegistry.getTask(taskId);
+      expect(task.completedAt).to.be.greaterThan(0);
+      expect(task.status).to.equal(2); // Completed
     });
   });
 });

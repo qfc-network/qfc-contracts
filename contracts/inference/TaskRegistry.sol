@@ -26,6 +26,7 @@ contract TaskRegistry is Ownable, ReentrancyGuard {
         uint256 maxFee;
         TaskStatus status;
         uint256 createdAt;
+        uint256 completedAt;
     }
 
     /// @notice Task ID => Task info
@@ -121,7 +122,8 @@ contract TaskRegistry is Ownable, ReentrancyGuard {
             miner: address(0),
             maxFee: maxFee,
             status: TaskStatus.Pending,
-            createdAt: block.timestamp
+            createdAt: block.timestamp,
+            completedAt: 0
         });
 
         // Add to open tasks
@@ -180,6 +182,7 @@ contract TaskRegistry is Ownable, ReentrancyGuard {
         task.status = TaskStatus.Completed;
         task.resultHash = resultHash;
         task.proof = proof;
+        task.completedAt = block.timestamp;
 
         // Release fee to miner
         feeEscrow.releaseFee(taskId, msg.sender);
@@ -210,6 +213,16 @@ contract TaskRegistry is Ownable, ReentrancyGuard {
         feeEscrow.refundFee(taskId);
 
         emit TaskCancelled(taskId);
+    }
+
+    /**
+     * @notice Get full task details.
+     * @param taskId The task ID.
+     * @return task The Task struct.
+     */
+    function getTask(bytes32 taskId) external view returns (Task memory) {
+        if (tasks[taskId].submitter == address(0)) revert TaskNotFound(taskId);
+        return tasks[taskId];
     }
 
     /**
