@@ -9,51 +9,64 @@ import "./FeeEscrow.sol";
 
 /**
  * @title TaskRegistry
- * @notice On-chain AI inference task submission and lifecycle management.
- *         Tasks flow: Pending → Claimed → Completed | Failed | Cancelled.
+ * @notice Core contract for the QFC AI Inference Marketplace.
+ * @dev Manages the lifecycle of inference tasks: submit → assign → complete/fail/cancel.
+ *      Coordinates with ModelRegistry, MinerRegistry, and FeeEscrow.
  */
 contract TaskRegistry is Ownable, ReentrancyGuard {
-    enum TaskStatus { Pending, Claimed, Completed, Failed, Cancelled }
+    enum TaskStatus { Pending, Assigned, Completed, Failed, Cancelled }
 
     struct Task {
-        uint256 id;
+        bytes32 modelId;
+        bytes32 inputHash;
+        bytes32 resultHash;
+        bytes32 proof;
         address submitter;
-        string modelId;
-        bytes input;           // serialized inference input
-        uint256 maxFee;        // max QFC willing to pay (wei)
-        TaskStatus status;
         address miner;
-        bytes result;          // serialized inference output
+        uint256 maxFee;
+        TaskStatus status;
         uint256 createdAt;
-        uint256 claimedAt;
-        uint256 completedAt;
     }
 
-    ModelRegistry public immutable modelRegistry;
-    MinerRegistry public immutable minerRegistry;
-    FeeEscrow public immutable feeEscrow;
+    /// @notice Task ID => Task info
+    mapping(bytes32 => Task) public tasks;
 
-    uint256 public nextTaskId;
-    uint256 public claimTimeout = 600; // 10 minutes to submit result
+    /// @notice List of open (Pending) task IDs
+    bytes32[] private _openTasks;
 
-    mapping(uint256 => Task) private _tasks;
+    /// @notice Index tracking for open tasks removal
+    mapping(bytes32 => uint256) private _openTaskIndex;
 
-    event TaskSubmitted(uint256 indexed taskId, address indexed submitter, string modelId, uint256 maxFee);
-    event TaskClaimed(uint256 indexed taskId, address indexed miner);
-    event TaskCompleted(uint256 indexed taskId, address indexed miner, bytes result);
-    event TaskFailed(uint256 indexed taskId, address indexed miner, string reason);
-    event TaskCancelled(uint256 indexed taskId);
-    event ClaimTimeoutUpdated(uint256 newTimeout);
+    /// @notice Total tasks created (used for ID generation)
+    uint256 public taskCount;
 
-    error ModelNotApproved(string modelId);
-    error FeeBelowMinimum(uint256 required, uint256 provided);
-    error TaskNotFound(uint256 taskId);
-    error TaskNotPending(uint256 taskId);
-    error TaskNotClaimed(uint256 taskId);
+    /// @notice Router address authorized to assign tasks
+    address public router;
+
+    ModelRegistry public modelRegistry;
+    MinerRegistry public minerRegistry;
+    FeeEscrow public feeEscrow;
+
+    event TaskSubmitted(bytes32 indexed taskId, bytes32 indexed modelId, address indexed submitter, uint256 fee);
+    event TaskAssigned(bytes32 indexed taskId, address indexed miner);
+    event TaskCompleted(bytes32 indexed taskId, bytes32 resultHash, bytes32 proof);
+    event TaskFailed(bytes32 indexed taskId);
+    event TaskCancelled(bytes32 indexed taskId);
+    event RouterSet(address indexed router);
+
+    error TaskNotFound(bytes32 taskId);
+    error InvalidStatus(bytes32 taskId, TaskStatus expected, TaskStatus actual);
+    error OnlyRouter();
+    error OnlySubmitter();
+    error OnlyAssignedMiner();
+    error InsufficientFee(uint256 required, uint256 provided);
+    error ModelNotActive(bytes32 modelId);
     error MinerNotEligible(address miner);
-    error NotTaskMiner(uint256 taskId);
-    error ClaimExpired(uint256 taskId);
-    error OnlySubmitter(uint256 taskId);
+
+    modifier onlyRouter() {
+        if (msg.sender != router) revert OnlyRouter();
+        _;
+    }
 
     constructor(
         address _modelRegistry,
@@ -65,116 +78,162 @@ contract TaskRegistry is Ownable, ReentrancyGuard {
         feeEscrow = FeeEscrow(_feeEscrow);
     }
 
-    /// @notice Submit an inference task with fee
-    /// @param modelId The model to use
-    /// @param input Serialized inference input
-    function submitTask(
-        string calldata modelId,
-        bytes calldata input
-    ) external payable nonReentrant returns (uint256 taskId) {
-        if (!modelRegistry.isApproved(modelId)) revert ModelNotApproved(modelId);
-        uint256 baseFee = modelRegistry.getBaseFee(modelId);
-        if (msg.value < baseFee) revert FeeBelowMinimum(baseFee, msg.value);
+    /**
+     * @notice Set the router address authorized to assign tasks.
+     * @param _router Address of the router.
+     */
+    function setRouter(address _router) external onlyOwner {
+        require(_router != address(0), "Zero address");
+        router = _router;
+        emit RouterSet(_router);
+    }
 
-        taskId = nextTaskId++;
-        _tasks[taskId] = Task({
-            id: taskId,
-            submitter: msg.sender,
+    /**
+     * @notice Submit a new inference task.
+     * @param modelId The model to run inference on.
+     * @param inputHash Hash of the off-chain input data.
+     * @param maxFee Maximum fee the submitter is willing to pay.
+     * @return taskId The generated task ID.
+     */
+    function submitTask(
+        bytes32 modelId,
+        bytes32 inputHash,
+        uint256 maxFee
+    ) external payable nonReentrant returns (bytes32 taskId) {
+        // Validate model exists and is active
+        ModelRegistry.Model memory model = modelRegistry.getModel(modelId);
+        if (!model.active) revert ModelNotActive(modelId);
+
+        // Validate fee
+        if (msg.value < model.baseFee) revert InsufficientFee(model.baseFee, msg.value);
+
+        // Generate task ID
+        taskId = keccak256(abi.encodePacked(block.chainid, address(this), taskCount));
+        taskCount++;
+
+        // Store task
+        tasks[taskId] = Task({
             modelId: modelId,
-            input: input,
-            maxFee: msg.value,
-            status: TaskStatus.Pending,
+            inputHash: inputHash,
+            resultHash: bytes32(0),
+            proof: bytes32(0),
+            submitter: msg.sender,
             miner: address(0),
-            result: "",
-            createdAt: block.timestamp,
-            claimedAt: 0,
-            completedAt: 0
+            maxFee: maxFee,
+            status: TaskStatus.Pending,
+            createdAt: block.timestamp
         });
 
+        // Add to open tasks
+        _openTaskIndex[taskId] = _openTasks.length;
+        _openTasks.push(taskId);
+
         // Lock fee in escrow
-        feeEscrow.deposit{value: msg.value}(taskId, msg.sender);
+        feeEscrow.lockFee{value: msg.value}(taskId, msg.sender);
 
-        emit TaskSubmitted(taskId, msg.sender, modelId, msg.value);
+        emit TaskSubmitted(taskId, modelId, msg.sender, msg.value);
     }
 
-    /// @notice Miner claims a pending task
-    /// @param taskId The task to claim
-    function claimTask(uint256 taskId) external {
-        Task storage t = _tasks[taskId];
-        if (t.createdAt == 0) revert TaskNotFound(taskId);
-        if (t.status != TaskStatus.Pending) revert TaskNotPending(taskId);
+    /**
+     * @notice Assign a pending task to a miner. Router only.
+     * @param taskId The task to assign.
+     * @param miner The miner to assign the task to.
+     */
+    function assignTask(bytes32 taskId, address miner) external onlyRouter {
+        Task storage task = tasks[taskId];
+        if (task.submitter == address(0)) revert TaskNotFound(taskId);
+        if (task.status != TaskStatus.Pending) {
+            revert InvalidStatus(taskId, TaskStatus.Pending, task.status);
+        }
 
-        uint8 minTier = modelRegistry.getMinTier(t.modelId);
-        if (!minerRegistry.isEligible(msg.sender, minTier)) revert MinerNotEligible(msg.sender);
+        // Verify miner is registered and eligible
+        MinerRegistry.Miner memory m = minerRegistry.getMiner(miner);
+        ModelRegistry.Model memory model = modelRegistry.getModel(task.modelId);
+        if (m.tier < model.minTier) revert MinerNotEligible(miner);
 
-        t.status = TaskStatus.Claimed;
-        t.miner = msg.sender;
-        t.claimedAt = block.timestamp;
+        task.status = TaskStatus.Assigned;
+        task.miner = miner;
 
-        emit TaskClaimed(taskId, msg.sender);
+        _removeFromOpenTasks(taskId);
+
+        emit TaskAssigned(taskId, miner);
     }
 
-    /// @notice Miner submits result for a claimed task
-    /// @param taskId The task ID
-    /// @param result Serialized inference output
-    function completeTask(uint256 taskId, bytes calldata result) external nonReentrant {
-        Task storage t = _tasks[taskId];
-        if (t.createdAt == 0) revert TaskNotFound(taskId);
-        if (t.status != TaskStatus.Claimed) revert TaskNotClaimed(taskId);
-        if (t.miner != msg.sender) revert NotTaskMiner(taskId);
-        if (block.timestamp > t.claimedAt + claimTimeout) revert ClaimExpired(taskId);
+    /**
+     * @notice Submit inference result. Only the assigned miner.
+     * @param taskId The task to complete.
+     * @param resultHash Hash of the off-chain result data.
+     * @param proof Proof of computation.
+     */
+    function submitResult(
+        bytes32 taskId,
+        bytes32 resultHash,
+        bytes32 proof
+    ) external nonReentrant {
+        Task storage task = tasks[taskId];
+        if (task.submitter == address(0)) revert TaskNotFound(taskId);
+        if (task.status != TaskStatus.Assigned) {
+            revert InvalidStatus(taskId, TaskStatus.Assigned, task.status);
+        }
+        if (task.miner != msg.sender) revert OnlyAssignedMiner();
 
-        t.status = TaskStatus.Completed;
-        t.result = result;
-        t.completedAt = block.timestamp;
+        task.status = TaskStatus.Completed;
+        task.resultHash = resultHash;
+        task.proof = proof;
 
-        // Release payment to miner
-        feeEscrow.release(taskId, msg.sender);
-        minerRegistry.recordTaskCompleted(msg.sender);
+        // Release fee to miner
+        feeEscrow.releaseFee(taskId, msg.sender);
 
-        emit TaskCompleted(taskId, msg.sender, result);
+        // Record completion in miner stats
+        minerRegistry.recordCompletion(msg.sender);
+
+        emit TaskCompleted(taskId, resultHash, proof);
     }
 
-    /// @notice Mark a claimed task as failed (expired or miner error)
-    /// @param taskId The task ID
-    function failTask(uint256 taskId, string calldata reason) external onlyOwner {
-        Task storage t = _tasks[taskId];
-        if (t.createdAt == 0) revert TaskNotFound(taskId);
-        if (t.status != TaskStatus.Claimed) revert TaskNotClaimed(taskId);
+    /**
+     * @notice Cancel a pending task. Only the submitter.
+     * @param taskId The task to cancel.
+     */
+    function cancelTask(bytes32 taskId) external nonReentrant {
+        Task storage task = tasks[taskId];
+        if (task.submitter == address(0)) revert TaskNotFound(taskId);
+        if (task.submitter != msg.sender) revert OnlySubmitter();
+        if (task.status != TaskStatus.Pending) {
+            revert InvalidStatus(taskId, TaskStatus.Pending, task.status);
+        }
 
-        t.status = TaskStatus.Failed;
-        address miner = t.miner;
+        task.status = TaskStatus.Cancelled;
 
-        // Refund submitter
-        feeEscrow.refund(taskId);
-        minerRegistry.recordTaskFailed(miner);
+        _removeFromOpenTasks(taskId);
 
-        emit TaskFailed(taskId, miner, reason);
-    }
-
-    /// @notice Submitter cancels a pending task
-    /// @param taskId The task ID
-    function cancelTask(uint256 taskId) external nonReentrant {
-        Task storage t = _tasks[taskId];
-        if (t.createdAt == 0) revert TaskNotFound(taskId);
-        if (t.submitter != msg.sender) revert OnlySubmitter(taskId);
-        if (t.status != TaskStatus.Pending) revert TaskNotPending(taskId);
-
-        t.status = TaskStatus.Cancelled;
-        feeEscrow.refund(taskId);
+        // Refund fee
+        feeEscrow.refundFee(taskId);
 
         emit TaskCancelled(taskId);
     }
 
-    /// @notice Get task details
-    function getTask(uint256 taskId) external view returns (Task memory) {
-        if (_tasks[taskId].createdAt == 0) revert TaskNotFound(taskId);
-        return _tasks[taskId];
+    /**
+     * @notice Get all open (Pending) task IDs.
+     * @return taskIds Array of pending task IDs.
+     */
+    function getOpenTasks() external view returns (bytes32[] memory taskIds) {
+        return _openTasks;
     }
 
-    /// @notice Update claim timeout
-    function setClaimTimeout(uint256 newTimeout) external onlyOwner {
-        claimTimeout = newTimeout;
-        emit ClaimTimeoutUpdated(newTimeout);
+    /**
+     * @dev Remove a task from the open tasks array using swap-and-pop.
+     */
+    function _removeFromOpenTasks(bytes32 taskId) internal {
+        uint256 index = _openTaskIndex[taskId];
+        uint256 lastIndex = _openTasks.length - 1;
+
+        if (index != lastIndex) {
+            bytes32 lastTaskId = _openTasks[lastIndex];
+            _openTasks[index] = lastTaskId;
+            _openTaskIndex[lastTaskId] = index;
+        }
+
+        _openTasks.pop();
+        delete _openTaskIndex[taskId];
     }
 }

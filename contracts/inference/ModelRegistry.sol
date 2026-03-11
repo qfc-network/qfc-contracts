@@ -5,125 +5,88 @@ import "@openzeppelin/contracts/access/Ownable.sol";
 
 /**
  * @title ModelRegistry
- * @notice Catalog of supported AI models with pricing, hardware requirements,
- *         and approval status. Only approved models can be used in TaskRegistry.
+ * @notice Registry for AI models available on the QFC Inference Marketplace.
+ * @dev Owner registers models with tier requirements and base fees.
+ *      Tiers: 1 = small (<7B), 2 = medium (7B-30B), 3 = large (30B+).
  */
 contract ModelRegistry is Ownable {
     struct Model {
-        string modelId;       // e.g. "llama-3-70b"
-        string name;          // human-readable name
-        uint256 baseFee;      // minimum fee per task (wei)
-        uint8 minTier;        // minimum miner tier required (1-3)
-        bool approved;
-        uint256 registeredAt;
+        string name;
+        uint8 minTier;
+        uint256 baseFee;
+        bool active;
     }
 
-    /// @dev modelId hash => Model
+    /// @notice Model ID => Model info
     mapping(bytes32 => Model) private _models;
-    /// @dev ordered list of model id hashes
-    bytes32[] private _modelIds;
 
-    event ModelRegistered(string indexed modelId, string name, uint256 baseFee, uint8 minTier);
-    event ModelApproved(string indexed modelId);
-    event ModelRevoked(string indexed modelId);
-    event ModelFeeUpdated(string indexed modelId, uint256 newBaseFee);
+    /// @notice All registered model IDs
+    bytes32[] public modelIds;
 
-    error ModelAlreadyExists(string modelId);
-    error ModelNotFound(string modelId);
+    event ModelRegistered(bytes32 indexed modelId, string name, uint8 minTier, uint256 baseFee);
+    event ModelActiveChanged(bytes32 indexed modelId, bool active);
+
+    error ModelAlreadyExists(bytes32 modelId);
+    error ModelNotFound(bytes32 modelId);
     error InvalidTier(uint8 tier);
-    error InvalidFee();
+    error InvalidBaseFee();
 
     constructor() Ownable(msg.sender) {}
 
-    /// @notice Register a new AI model in the catalog
-    /// @param modelId Unique model identifier
-    /// @param name Human-readable name
-    /// @param baseFee Minimum fee per task in wei
-    /// @param minTier Minimum miner tier required (1-3)
+    /**
+     * @notice Register a new AI model.
+     * @param modelId Unique identifier for the model.
+     * @param name Human-readable model name.
+     * @param minTier Minimum miner tier required (1-3).
+     * @param baseFee Base fee in native token (wei).
+     */
     function registerModel(
-        string calldata modelId,
+        bytes32 modelId,
         string calldata name,
-        uint256 baseFee,
-        uint8 minTier
+        uint8 minTier,
+        uint256 baseFee
     ) external onlyOwner {
+        if (bytes(_models[modelId].name).length != 0) revert ModelAlreadyExists(modelId);
         if (minTier == 0 || minTier > 3) revert InvalidTier(minTier);
-        if (baseFee == 0) revert InvalidFee();
+        if (baseFee == 0) revert InvalidBaseFee();
 
-        bytes32 key = keccak256(bytes(modelId));
-        if (_models[key].registeredAt != 0) revert ModelAlreadyExists(modelId);
-
-        _models[key] = Model({
-            modelId: modelId,
+        _models[modelId] = Model({
             name: name,
-            baseFee: baseFee,
             minTier: minTier,
-            approved: true,
-            registeredAt: block.timestamp
+            baseFee: baseFee,
+            active: true
         });
-        _modelIds.push(key);
+        modelIds.push(modelId);
 
-        emit ModelRegistered(modelId, name, baseFee, minTier);
-        emit ModelApproved(modelId);
+        emit ModelRegistered(modelId, name, minTier, baseFee);
     }
 
-    /// @notice Approve a previously revoked model
-    function approveModel(string calldata modelId) external onlyOwner {
-        bytes32 key = keccak256(bytes(modelId));
-        if (_models[key].registeredAt == 0) revert ModelNotFound(modelId);
-        _models[key].approved = true;
-        emit ModelApproved(modelId);
+    /**
+     * @notice Activate or deactivate a model.
+     * @param modelId The model to update.
+     * @param active Whether the model should be active.
+     */
+    function setModelActive(bytes32 modelId, bool active) external onlyOwner {
+        if (bytes(_models[modelId].name).length == 0) revert ModelNotFound(modelId);
+        _models[modelId].active = active;
+        emit ModelActiveChanged(modelId, active);
     }
 
-    /// @notice Revoke approval for a model
-    function revokeModel(string calldata modelId) external onlyOwner {
-        bytes32 key = keccak256(bytes(modelId));
-        if (_models[key].registeredAt == 0) revert ModelNotFound(modelId);
-        _models[key].approved = false;
-        emit ModelRevoked(modelId);
+    /**
+     * @notice Get model details.
+     * @param modelId The model identifier.
+     * @return model The Model struct.
+     */
+    function getModel(bytes32 modelId) external view returns (Model memory model) {
+        if (bytes(_models[modelId].name).length == 0) revert ModelNotFound(modelId);
+        return _models[modelId];
     }
 
-    /// @notice Update the base fee for a model
-    function updateBaseFee(string calldata modelId, uint256 newBaseFee) external onlyOwner {
-        if (newBaseFee == 0) revert InvalidFee();
-        bytes32 key = keccak256(bytes(modelId));
-        if (_models[key].registeredAt == 0) revert ModelNotFound(modelId);
-        _models[key].baseFee = newBaseFee;
-        emit ModelFeeUpdated(modelId, newBaseFee);
-    }
-
-    /// @notice Check if a model is approved
-    function isApproved(string calldata modelId) external view returns (bool) {
-        return _models[keccak256(bytes(modelId))].approved;
-    }
-
-    /// @notice Get model details
-    function getModel(string calldata modelId) external view returns (Model memory) {
-        bytes32 key = keccak256(bytes(modelId));
-        if (_models[key].registeredAt == 0) revert ModelNotFound(modelId);
-        return _models[key];
-    }
-
-    /// @notice Get the base fee for a model
-    function getBaseFee(string calldata modelId) external view returns (uint256) {
-        bytes32 key = keccak256(bytes(modelId));
-        if (_models[key].registeredAt == 0) revert ModelNotFound(modelId);
-        return _models[key].baseFee;
-    }
-
-    /// @notice Get the minimum miner tier for a model
-    function getMinTier(string calldata modelId) external view returns (uint8) {
-        bytes32 key = keccak256(bytes(modelId));
-        if (_models[key].registeredAt == 0) revert ModelNotFound(modelId);
-        return _models[key].minTier;
-    }
-
-    /// @notice Total registered models
-    function modelCount() external view returns (uint256) {
-        return _modelIds.length;
-    }
-
-    /// @notice Get model by index (for enumeration)
-    function modelAtIndex(uint256 index) external view returns (Model memory) {
-        return _models[_modelIds[index]];
+    /**
+     * @notice Get the number of registered models.
+     * @return count Total model count.
+     */
+    function getModelCount() external view returns (uint256 count) {
+        return modelIds.length;
     }
 }

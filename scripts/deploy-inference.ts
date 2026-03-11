@@ -2,31 +2,30 @@ import { ethers } from "hardhat";
 
 async function main() {
   const [deployer] = await ethers.getSigners();
-  console.log("Deploying inference contracts with:", deployer.address);
+  console.log("Deploying inference contracts with account:", deployer.address);
 
-  // 1. ModelRegistry
+  // 1. Deploy ModelRegistry
   const ModelRegistry = await ethers.getContractFactory("ModelRegistry");
   const modelRegistry = await ModelRegistry.deploy();
   await modelRegistry.waitForDeployment();
   const modelRegistryAddr = await modelRegistry.getAddress();
-  console.log("ModelRegistry:", modelRegistryAddr);
+  console.log("ModelRegistry deployed to:", modelRegistryAddr);
 
-  // 2. MinerRegistry (min stake = 1 QFC)
-  const minStake = ethers.parseEther("1");
+  // 2. Deploy MinerRegistry
   const MinerRegistry = await ethers.getContractFactory("MinerRegistry");
-  const minerRegistry = await MinerRegistry.deploy(minStake);
+  const minerRegistry = await MinerRegistry.deploy();
   await minerRegistry.waitForDeployment();
   const minerRegistryAddr = await minerRegistry.getAddress();
-  console.log("MinerRegistry:", minerRegistryAddr);
+  console.log("MinerRegistry deployed to:", minerRegistryAddr);
 
-  // 3. FeeEscrow (2.5% protocol fee)
+  // 3. Deploy FeeEscrow
   const FeeEscrow = await ethers.getContractFactory("FeeEscrow");
-  const feeEscrow = await FeeEscrow.deploy(250, deployer.address);
+  const feeEscrow = await FeeEscrow.deploy();
   await feeEscrow.waitForDeployment();
   const feeEscrowAddr = await feeEscrow.getAddress();
-  console.log("FeeEscrow:", feeEscrowAddr);
+  console.log("FeeEscrow deployed to:", feeEscrowAddr);
 
-  // 4. TaskRegistry
+  // 4. Deploy TaskRegistry
   const TaskRegistry = await ethers.getContractFactory("TaskRegistry");
   const taskRegistry = await TaskRegistry.deploy(
     modelRegistryAddr,
@@ -35,53 +34,64 @@ async function main() {
   );
   await taskRegistry.waitForDeployment();
   const taskRegistryAddr = await taskRegistry.getAddress();
-  console.log("TaskRegistry:", taskRegistryAddr);
+  console.log("TaskRegistry deployed to:", taskRegistryAddr);
 
-  // 5. ResultVerifier (slash = 0.5 QFC, challenge stake = 0.1 QFC)
-  const ResultVerifier = await ethers.getContractFactory("ResultVerifier");
-  const resultVerifier = await ResultVerifier.deploy(
-    taskRegistryAddr,
-    minerRegistryAddr,
-    ethers.parseEther("0.5"),
-    ethers.parseEther("0.1")
-  );
-  await resultVerifier.waitForDeployment();
-  const resultVerifierAddr = await resultVerifier.getAddress();
-  console.log("ResultVerifier:", resultVerifierAddr);
+  // 5. Wire contracts together
+  console.log("\nWiring contracts...");
+  await minerRegistry.setTaskRegistry(taskRegistryAddr);
+  console.log("MinerRegistry → TaskRegistry linked");
 
-  // 6. Transfer FeeEscrow ownership to TaskRegistry
-  await feeEscrow.transferOwnership(taskRegistryAddr);
-  console.log("FeeEscrow ownership transferred to TaskRegistry");
+  await feeEscrow.setTaskRegistry(taskRegistryAddr);
+  console.log("FeeEscrow → TaskRegistry linked");
 
-  // 7. Authorize TaskRegistry and ResultVerifier on MinerRegistry
-  await minerRegistry.authorizeCaller(taskRegistryAddr);
-  await minerRegistry.authorizeCaller(resultVerifierAddr);
-  console.log("TaskRegistry and ResultVerifier authorized on MinerRegistry");
+  // Set deployer as router for convenience
+  await taskRegistry.setRouter(deployer.address);
+  console.log("TaskRegistry router set to deployer");
 
-  // 8. Register default models
+  // 6. Register initial models
+  console.log("\nRegistering initial models...");
+
+  const llama3_8b = ethers.id("llama3-8b");
   await modelRegistry.registerModel(
-    "llama-3-70b",
-    "Llama 3 70B",
-    ethers.parseEther("0.01"),
-    2
+    llama3_8b,
+    "llama3-8b",
+    1,
+    ethers.parseEther("0.01")
   );
-  await modelRegistry.registerModel(
-    "llama-3-8b",
-    "Llama 3 8B",
-    ethers.parseEther("0.002"),
-    1
-  );
-  console.log("Default models registered");
+  console.log("Registered: llama3-8b (tier1, 0.01 QFC)");
 
-  console.log("\n--- Deployment Summary ---");
-  console.log("ModelRegistry:   ", modelRegistryAddr);
-  console.log("MinerRegistry:   ", minerRegistryAddr);
-  console.log("FeeEscrow:       ", feeEscrowAddr);
-  console.log("TaskRegistry:    ", taskRegistryAddr);
-  console.log("ResultVerifier:  ", resultVerifierAddr);
+  const llama3_70b = ethers.id("llama3-70b");
+  await modelRegistry.registerModel(
+    llama3_70b,
+    "llama3-70b",
+    2,
+    ethers.parseEther("0.05")
+  );
+  console.log("Registered: llama3-70b (tier2, 0.05 QFC)");
+
+  const whisper = ethers.id("whisper-large-v3");
+  await modelRegistry.registerModel(
+    whisper,
+    "whisper-large-v3",
+    1,
+    ethers.parseEther("0.005")
+  );
+  console.log("Registered: whisper-large-v3 (tier1, 0.005 QFC)");
+
+  // Summary
+  console.log("\n========================================");
+  console.log("Inference Marketplace Deployment Summary");
+  console.log("========================================");
+  console.log("ModelRegistry: ", modelRegistryAddr);
+  console.log("MinerRegistry: ", minerRegistryAddr);
+  console.log("FeeEscrow:     ", feeEscrowAddr);
+  console.log("TaskRegistry:  ", taskRegistryAddr);
+  console.log("========================================");
 }
 
-main().catch((error) => {
-  console.error(error);
-  process.exitCode = 1;
-});
+main()
+  .then(() => process.exit(0))
+  .catch((error) => {
+    console.error(error);
+    process.exit(1);
+  });

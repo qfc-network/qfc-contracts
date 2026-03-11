@@ -111,40 +111,48 @@ contract StakingPool is ReentrancyGuard, Ownable {
      * @dev Withdraw staked tokens
      * @param amount Amount to withdraw
      */
-    function withdraw(uint256 amount) public nonReentrant updateReward(msg.sender) {
-        require(amount > 0, "Cannot withdraw 0");
-        require(stakes[msg.sender].amount >= amount, "Insufficient stake");
-        require(
-            block.timestamp >= stakes[msg.sender].stakeTime + lockPeriod,
-            "Still locked"
-        );
-
-        totalStaked -= amount;
-        stakes[msg.sender].amount -= amount;
-
-        stakingToken.safeTransfer(msg.sender, amount);
-
-        emit Withdrawn(msg.sender, amount);
+    function withdraw(uint256 amount) external nonReentrant updateReward(msg.sender) {
+        _withdraw(msg.sender, amount);
     }
 
     /**
      * @dev Claim rewards
      */
-    function claimRewards() public nonReentrant updateReward(msg.sender) {
-        uint256 reward = stakes[msg.sender].rewards;
-        if (reward > 0) {
-            stakes[msg.sender].rewards = 0;
-            rewardToken.safeTransfer(msg.sender, reward);
-            emit RewardPaid(msg.sender, reward);
-        }
+    function claimRewards() external nonReentrant updateReward(msg.sender) {
+        _claimRewards(msg.sender);
     }
 
     /**
      * @dev Withdraw all and claim rewards
      */
-    function exit() external {
-        this.withdraw(stakes[msg.sender].amount);
-        this.claimRewards();
+    function exit() external nonReentrant updateReward(msg.sender) {
+        _withdraw(msg.sender, stakes[msg.sender].amount);
+        _claimRewards(msg.sender);
+    }
+
+    function _withdraw(address account, uint256 amount) internal {
+        require(amount > 0, "Cannot withdraw 0");
+        require(stakes[account].amount >= amount, "Insufficient stake");
+        require(
+            block.timestamp >= stakes[account].stakeTime + lockPeriod,
+            "Still locked"
+        );
+
+        totalStaked -= amount;
+        stakes[account].amount -= amount;
+
+        stakingToken.safeTransfer(account, amount);
+
+        emit Withdrawn(account, amount);
+    }
+
+    function _claimRewards(address account) internal {
+        uint256 reward = stakes[account].rewards;
+        if (reward > 0) {
+            stakes[account].rewards = 0;
+            rewardToken.safeTransfer(account, reward);
+            emit RewardPaid(account, reward);
+        }
     }
 
     /**
