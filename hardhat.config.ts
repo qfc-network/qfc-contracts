@@ -10,16 +10,15 @@ const PRIVATE_KEY = process.env.PRIVATE_KEY || "0x000000000000000000000000000000
 
 const config: HardhatUserConfig = {
   solidity: {
-    version: "0.8.28",
-    settings: {
-      evmVersion: "cancun",
-      optimizer: {
-        enabled: true,
-        runs: 200,
-      },
-      viaIR: true,
-      evmVersion: "cancun",
-    },
+    // NOTE: QFC chain does NOT support PUSH0/mcopy — on-chain deploys MUST use evmVersion "paris".
+    // We use "cancun" here because OpenZeppelin 5.6+ requires mcopy. Hardhat's local EVM supports it.
+    // For QFC deployment, use deploy scripts that override evmVersion to "paris" and avoid
+    // contracts importing OZ 5.5+ modules that use mcopy (e.g. Bytes.sol, Arrays.sol).
+    compilers: [
+      { version: "0.8.28", settings: { evmVersion: "cancun", viaIR: true, optimizer: { enabled: true, runs: 200 } } },
+      { version: "0.8.24", settings: { evmVersion: "cancun", viaIR: true, optimizer: { enabled: true, runs: 200 } } },
+      { version: "0.8.20", settings: { evmVersion: "cancun", viaIR: true, optimizer: { enabled: true, runs: 200 } } },
+    ],
   },
   networks: {
     hardhat: {
