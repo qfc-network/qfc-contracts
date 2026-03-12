@@ -38,7 +38,7 @@ contract MinerRegistry is Ownable {
     event MinerRegistered(address indexed miner, uint8 tier, string endpoint);
     event MinerStatusUpdated(address indexed miner, Status status);
     event MinerStatsUpdated(address indexed miner, uint256 completed, uint256 failed, uint256 reputation);
-    event MinerSlashed(address indexed miner, uint256 amount);
+    event MinerSlashed(address indexed miner, uint256 penaltyBps);
     event TaskRegistrySet(address indexed taskRegistry);
     event ResultVerifierSet(address indexed resultVerifier);
 
@@ -136,19 +136,27 @@ contract MinerRegistry is Ownable {
     }
 
     /**
-     * @notice Slash a miner's reputation. Called by ResultVerifier.
-     * @param miner The miner address to slash.
-     * @param amount The reputation points to deduct.
+     * @notice Slash a miner's reputation. Called by ResultVerifier on upheld challenges.
+     * @param miner The miner address.
+     * @param penaltyBps Reputation penalty in basis points (e.g. 1000 = 10%).
      */
-    function slash(address miner, uint256 amount) external onlyResultVerifier {
+    function slash(address miner, uint256 penaltyBps) external onlyResultVerifier {
         Miner storage m = _miners[miner];
         if (!m.registered) revert NotRegistered();
-        if (m.reputation > amount) {
-            m.reputation -= amount;
-        } else {
+
+        // Record failure
+        m.failed++;
+
+        // Apply reputation penalty
+        uint256 penalty = (m.reputation * penaltyBps) / 10000;
+        if (penalty > m.reputation) {
             m.reputation = 0;
+        } else {
+            m.reputation -= penalty;
         }
-        emit MinerSlashed(miner, amount);
+
+        emit MinerSlashed(miner, penaltyBps);
+        emit MinerStatsUpdated(miner, m.completed, m.failed, m.reputation);
     }
 
     /**

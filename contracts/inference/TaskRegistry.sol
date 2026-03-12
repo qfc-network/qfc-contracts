@@ -216,14 +216,13 @@ contract TaskRegistry is Ownable, ReentrancyGuard {
     }
 
     /**
-     * @notice Get task details by ID.
-     * @param taskId The task identifier.
+     * @notice Get full task details.
+     * @param taskId The task ID.
      * @return task The Task struct.
      */
-    function getTask(bytes32 taskId) external view returns (Task memory task) {
-        task = tasks[taskId];
-        if (task.submitter == address(0)) revert TaskNotFound(taskId);
-        return task;
+    function getTask(bytes32 taskId) external view returns (Task memory) {
+        if (tasks[taskId].submitter == address(0)) revert TaskNotFound(taskId);
+        return tasks[taskId];
     }
 
     /**
