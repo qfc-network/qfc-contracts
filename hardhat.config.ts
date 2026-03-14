@@ -38,11 +38,23 @@ const config: HardhatUserConfig = {
       chainId: 9001,
       accounts: [PRIVATE_KEY],
     },
+    sepolia: {
+      url: process.env.SEPOLIA_RPC || "https://rpc.sepolia.org",
+      chainId: 11155111,
+      accounts: [PRIVATE_KEY],
+    },
+    bscTestnet: {
+      url: process.env.BSC_TESTNET_RPC || "https://data-seed-prebsc-1-s1.binance.org:8545",
+      chainId: 97,
+      accounts: [PRIVATE_KEY],
+    },
   },
   etherscan: {
     apiKey: {
       qfc_testnet: process.env.EXPLORER_API_KEY || "",
       qfc_mainnet: process.env.EXPLORER_API_KEY || "",
+      sepolia: process.env.ETHERSCAN_API_KEY || "",
+      bscTestnet: process.env.BSCSCAN_API_KEY || "",
     },
     customChains: [
       {
