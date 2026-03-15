@@ -7,14 +7,14 @@ async function main() {
   // 1. Deploy QUSD (mock stablecoin for margin)
   const MockToken = await ethers.getContractFactory("QFCToken");
   const qusd = await MockToken.deploy(
-    "QFC USD",
-    "QUSD",
+    "qUSD Stablecoin",
+    "qUSD",
     ethers.parseEther("1000000000"), // 1B cap
     ethers.parseEther("100000000")   // 100M initial
   );
   await qusd.waitForDeployment();
   const qusdAddr = await qusd.getAddress();
-  console.log("QUSD deployed:", qusdAddr);
+  console.log("qUSD deployed:", qusdAddr);
 
   // 2. Deploy PriceOracle
   const Oracle = await ethers.getContractFactory("PriceOracle");

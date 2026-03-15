@@ -10,8 +10,8 @@ describe("Perpetuals", function () {
     // Deploy QUSD mock token
     const QFCToken = await ethers.getContractFactory("QFCToken");
     const qusd = await QFCToken.deploy(
-      "QFC USD",
-      "QUSD",
+      "qUSD Stablecoin",
+      "qUSD",
       ethers.parseEther("1000000000"),
       ethers.parseEther("100000000")
     );

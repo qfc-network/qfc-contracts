@@ -8,7 +8,7 @@ import "@openzeppelin/contracts/access/Ownable.sol";
 
 /**
  * @title QUSDToken
- * @notice QRC-20 stablecoin pegged to USD. Only the CDPVault can mint and burn.
+ * @notice qUSD — QFC's native stablecoin pegged to USD. Only the CDPVault can mint and burn.
  */
 contract QUSDToken is ERC20, ERC20Burnable, ERC20Permit, Ownable {
     /// @notice Address of the CDPVault authorized to mint/burn
@@ -24,7 +24,7 @@ contract QUSDToken is ERC20, ERC20Burnable, ERC20Permit, Ownable {
         _;
     }
 
-    constructor() ERC20("QUSD Stablecoin", "QUSD") ERC20Permit("QUSD Stablecoin") Ownable(msg.sender) {}
+    constructor() ERC20("qUSD Stablecoin", "qUSD") ERC20Permit("qUSD Stablecoin") Ownable(msg.sender) {}
 
     /**
      * @notice Set the CDPVault address authorized to mint/burn
@@ -38,7 +38,7 @@ contract QUSDToken is ERC20, ERC20Burnable, ERC20Permit, Ownable {
     }
 
     /**
-     * @notice Mint QUSD tokens. Only callable by the vault.
+     * @notice Mint qUSD tokens. Only callable by the vault.
      * @param to Recipient address
      * @param amount Amount to mint
      */
@@ -47,7 +47,7 @@ contract QUSDToken is ERC20, ERC20Burnable, ERC20Permit, Ownable {
     }
 
     /**
-     * @notice Burn QUSD tokens from an address. Only callable by the vault.
+     * @notice Burn qUSD tokens from an address. Only callable by the vault.
      * @param from Address to burn from
      * @param amount Amount to burn
      */

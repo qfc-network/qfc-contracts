@@ -9,7 +9,7 @@ import "@openzeppelin/contracts/access/Ownable.sol";
 
 /**
  * @title LiquidityPool
- * @dev GLP-style liquidity pool for perpetual futures. LPs deposit QUSD and
+ * @dev GLP-style liquidity pool for perpetual futures. LPs deposit qUSD and
  *      receive LP shares. The pool acts as counterparty to all trades and
  *      earns 60% of trading fees.
  */
@@ -65,7 +65,7 @@ contract LiquidityPool is ERC20, ReentrancyGuard, Ownable {
 
     /**
      * @dev Add liquidity to the pool by depositing QUSD.
-     * @param amount Amount of QUSD to deposit
+     * @param amount Amount of qUSD to deposit
      * @return shares Number of LP shares minted
      */
     function addLiquidity(uint256 amount) external nonReentrant returns (uint256 shares) {
@@ -89,7 +89,7 @@ contract LiquidityPool is ERC20, ReentrancyGuard, Ownable {
     /**
      * @dev Remove liquidity by burning LP shares.
      * @param shares Number of LP shares to burn
-     * @return amount Amount of QUSD returned
+     * @return amount Amount of qUSD returned
      */
     function removeLiquidity(uint256 shares) external nonReentrant returns (uint256 amount) {
         if (shares == 0) revert ZeroAmount();
@@ -106,8 +106,8 @@ contract LiquidityPool is ERC20, ReentrancyGuard, Ownable {
     }
 
     /**
-     * @dev Total assets managed by the pool: QUSD balance adjusted for net PnL.
-     * @return Total value in QUSD
+     * @dev Total assets managed by the pool: qUSD balance adjusted for net PnL.
+     * @return Total value in qUSD
      */
     function totalAssets() public view returns (uint256) {
         uint256 balance = qusd.balanceOf(address(this));
@@ -123,7 +123,7 @@ contract LiquidityPool is ERC20, ReentrancyGuard, Ownable {
 
     /**
      * @dev Accrue trading fees to the pool (called by Router).
-     * @param amount Fee amount in QUSD
+     * @param amount Fee amount in qUSD
      */
     function accrueFees(uint256 amount) external onlyAuthorized {
         accumulatedFees += amount;
@@ -142,9 +142,9 @@ contract LiquidityPool is ERC20, ReentrancyGuard, Ownable {
     }
 
     /**
-     * @dev Transfer QUSD out of the pool (for paying trader profits).
+     * @dev Transfer qUSD out of the pool (for paying trader profits).
      * @param to Recipient
-     * @param amount Amount of QUSD
+     * @param amount Amount of qUSD
      */
     function transferOut(address to, uint256 amount) external onlyAuthorized {
         if (amount > qusd.balanceOf(address(this))) revert InsufficientPoolBalance();

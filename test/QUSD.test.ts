@@ -32,8 +32,8 @@ describe("QUSD Stablecoin System", function () {
   describe("QUSDToken", function () {
     it("should have correct name and symbol", async function () {
       const { qusd } = await loadFixture(deployFixture);
-      expect(await qusd.name()).to.equal("QUSD Stablecoin");
-      expect(await qusd.symbol()).to.equal("QUSD");
+      expect(await qusd.name()).to.equal("qUSD Stablecoin");
+      expect(await qusd.symbol()).to.equal("qUSD");
     });
 
     it("should only allow vault to mint", async function () {

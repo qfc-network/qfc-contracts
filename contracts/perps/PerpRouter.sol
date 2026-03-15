@@ -154,7 +154,7 @@ contract PerpRouter is ReentrancyGuard, Ownable {
         uint256 openFee = (sizeUSD * OPEN_FEE_BPS) / BASIS_POINTS;
         uint256 totalRequired = collateral + openFee;
 
-        // Transfer QUSD from trader
+        // Transfer qUSD from trader
         qusd.safeTransferFrom(msg.sender, address(this), totalRequired);
 
         // Distribute fee

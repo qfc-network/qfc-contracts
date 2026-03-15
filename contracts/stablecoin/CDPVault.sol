@@ -8,7 +8,7 @@ import "./PriceFeed.sol";
 
 /**
  * @title CDPVault
- * @notice Collateralized Debt Position vault — lock QFC (native) to mint QUSD stablecoin.
+ * @notice Collateralized Debt Position vault — lock QFC (native) to mint qUSD stablecoin.
  * @dev Minimum collateral ratio: 150%. Liquidation threshold: 130%. Stability fee: 2% annual.
  */
 contract CDPVault is ReentrancyGuard, Ownable {
@@ -35,7 +35,7 @@ contract CDPVault is ReentrancyGuard, Ownable {
 
     struct Position {
         uint256 collateral;      // QFC deposited (wei)
-        uint256 debt;            // QUSD principal owed
+        uint256 debt;            // qUSD principal owed
         uint256 lastFeeUpdate;   // timestamp of last fee accrual
         uint256 accruedFees;     // accumulated stability fees
     }
@@ -78,8 +78,8 @@ contract CDPVault is ReentrancyGuard, Ownable {
     }
 
     /**
-     * @notice Mint QUSD against deposited collateral
-     * @param amount Amount of QUSD to mint
+     * @notice Mint qUSD against deposited collateral
+     * @param amount Amount of qUSD to mint
      */
     function mintQUSD(uint256 amount) external nonReentrant {
         if (amount == 0) revert ZeroAmount();
@@ -99,8 +99,8 @@ contract CDPVault is ReentrancyGuard, Ownable {
     }
 
     /**
-     * @notice Repay QUSD debt
-     * @param amount Amount of QUSD to repay
+     * @notice Repay qUSD debt
+     * @param amount Amount of qUSD to repay
      */
     function burnQUSD(uint256 amount) external nonReentrant {
         if (amount == 0) revert ZeroAmount();

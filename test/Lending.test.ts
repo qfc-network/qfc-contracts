@@ -19,7 +19,7 @@ describe("QFC Lending Protocol", function () {
     const Token = await ethers.getContractFactory("QFCToken");
     const qfc = await Token.deploy("QFC Token", "QFC", ethers.parseEther("1000000000"), ethers.parseEther("1000000"));
     const ttk = await Token.deploy("Test Token", "TTK", ethers.parseEther("1000000000"), ethers.parseEther("1000000"));
-    const qusd = await Token.deploy("QUSD Stablecoin", "QUSD", ethers.parseEther("1000000000"), ethers.parseEther("1000000"));
+    const qusd = await Token.deploy("qUSD Stablecoin", "qUSD", ethers.parseEther("1000000000"), ethers.parseEther("1000000"));
 
     // Deploy InterestRateModel: 2% base, ~20% at 80% util, jump to 100% at 100%
     const InterestRateModel = await ethers.getContractFactory("InterestRateModel");

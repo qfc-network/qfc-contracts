@@ -21,9 +21,9 @@ async function main() {
   await qdoge.waitForDeployment();
   console.log("QDOGE Token deployed to:", await qdoge.getAddress());
 
-  const qusd = await Token.deploy("QUSD Stablecoin", "QUSD", ethers.parseEther("1000000000"), ethers.parseEther("100000000"));
+  const qusd = await Token.deploy("qUSD Stablecoin", "qUSD", ethers.parseEther("1000000000"), ethers.parseEther("100000000"));
   await qusd.waitForDeployment();
-  console.log("QUSD Token deployed to:", await qusd.getAddress());
+  console.log("qUSD Token deployed to:", await qusd.getAddress());
 
   // ─── 2. Deploy InterestRateModel ──────────────────────────────────
   const InterestRateModel = await ethers.getContractFactory("InterestRateModel");

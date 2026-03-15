@@ -2,7 +2,7 @@ import { ethers } from "hardhat";
 
 async function main() {
   const [deployer] = await ethers.getSigners();
-  console.log("Deploying QUSD contracts with account:", deployer.address);
+  console.log("Deploying qUSD contracts with account:", deployer.address);
   console.log("Balance:", ethers.formatEther(await ethers.provider.getBalance(deployer.address)), "QFC");
 
   // 1. Deploy PriceFeed with initial QFC/USD price ($2.00 = 200_000_000)
@@ -29,7 +29,7 @@ async function main() {
 
   // 4. Set vault as the authorized minter/burner on QUSDToken
   await qusd.setVault(vaultAddr);
-  console.log("✅ CDPVault set as QUSD vault");
+  console.log("✅ CDPVault set as qUSD vault");
 
   // 5. Deploy Liquidator helper
   const Liquidator = await ethers.getContractFactory("Liquidator");
