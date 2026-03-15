@@ -29,5 +29,14 @@ Thumbs.db
 *.log
 npm-debug.log*
 
+# ZK circuit build intermediates (regenerate with circuits/build.sh)
+build/circuits/*.ptau
+build/circuits/*.r1cs
+build/circuits/*.sym
+build/circuits/*_0000.zkey
+build/circuits/*_0001.zkey
+build/circuits/withdraw_js/generate_witness.js
+build/circuits/withdraw_js/witness_calculator.js
+
 # Test
 .nyc_output/
