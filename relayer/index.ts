@@ -68,22 +68,24 @@ app.use(express.json());
 // ---------------------------------------------------------------------------
 app.get("/status", async (_req, res) => {
   try {
-    const [balance, feeBps, poolBalance, deposits, relayerBal] = await Promise.all([
-      provider.getBalance(wallet.address),
-      pool.relayerFeeBps(),
-      pool.getPoolBalance(),
-      pool.depositCount(),
-      provider.getBalance(wallet.address),
-    ]);
+    const balance = await provider.getBalance(wallet.address);
+
+    // These calls may fail if the pool contract is freshly deployed
+    let feeBps = "50", poolBalance = "0", deposits = "0";
+    try {
+      feeBps = (await pool.relayerFeeBps()).toString();
+      poolBalance = ethers.formatEther(await pool.getPoolBalance());
+      deposits = (await pool.depositCount()).toString();
+    } catch { /* pool may not have balances yet */ }
 
     res.json({
       status: "ok",
       relayer: wallet.address,
       gasBalance: ethers.formatEther(balance),
       poolAddress: POOL_ADDRESS,
-      poolBalance: ethers.formatEther(poolBalance),
-      totalDeposits: deposits.toString(),
-      relayerFeeBps: feeBps.toString(),
+      poolBalance,
+      totalDeposits: deposits,
+      relayerFeeBps: feeBps,
       pendingJobs: [...jobs.values()].filter(j => j.status === "pending").length,
     });
   } catch (err: any) {
