@@ -12,6 +12,9 @@
     "deploy:bridge:testnet": "hardhat run scripts/deploy-bridge.ts --network qfc_testnet",
     "deploy:bridge:sepolia": "hardhat run scripts/deploy-bridge.ts --network sepolia",
     "deploy:bridge:bsc": "hardhat run scripts/deploy-bridge.ts --network bscTestnet",
+    "deploy:privacy:testnet": "hardhat run scripts/deploy-privacy.ts --network qfc_testnet",
+    "deploy:privacy:local": "hardhat run scripts/deploy-privacy.ts --network localhost",
+    "relayer": "npx ts-node relayer/index.ts",
     "verify": "hardhat verify",
     "clean": "hardhat clean",
     "node": "hardhat node",
@@ -37,6 +40,8 @@
     "@typechain/ethers-v6": "^0.5.0",
     "@typechain/hardhat": "^9.0.0",
     "@types/chai": "^4.3.0",
+    "@types/cors": "^2.8.19",
+    "@types/express": "^5.0.6",
     "@types/mocha": "^10.0.0",
     "@types/node": "^20.0.0",
     "chai": "^4.3.0",
@@ -55,7 +60,9 @@
     "@openzeppelin/merkle-tree": "^1.0.8",
     "circomlib": "^2.0.5",
     "circomlibjs": "^0.1.7",
+    "cors": "^2.8.6",
     "dotenv": "^17.3.1",
+    "express": "^5.2.1",
     "snarkjs": "^0.7.6"
   }
 }
