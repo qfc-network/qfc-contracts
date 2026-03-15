@@ -10,10 +10,8 @@ const PRIVATE_KEY = process.env.PRIVATE_KEY || "0x000000000000000000000000000000
 
 const config: HardhatUserConfig = {
   solidity: {
-    // NOTE: QFC chain does NOT support PUSH0/mcopy — on-chain deploys MUST use evmVersion "paris".
-    // We use "cancun" here because OpenZeppelin 5.6+ requires mcopy. Hardhat's local EVM supports it.
-    // For QFC deployment, use deploy scripts that override evmVersion to "paris" and avoid
-    // contracts importing OZ 5.5+ modules that use mcopy (e.g. Bytes.sol, Arrays.sol).
+    // QFC chain supports Cancun EVM (PUSH0, MCOPY, TSTORE/TLOAD).
+    // See qfc-core/crates/qfc-executor/src/evm.rs — SpecId::CANCUN.
     compilers: [
       { version: "0.8.28", settings: { evmVersion: "cancun", viaIR: true, optimizer: { enabled: true, runs: 200 } } },
       { version: "0.8.24", settings: { evmVersion: "cancun", viaIR: true, optimizer: { enabled: true, runs: 200 } } },
@@ -39,7 +37,7 @@ const config: HardhatUserConfig = {
       accounts: [PRIVATE_KEY],
     },
     sepolia: {
-      url: process.env.SEPOLIA_RPC || "https://rpc.sepolia.org",
+      url: process.env.SEPOLIA_RPC || "https://1rpc.io/sepolia",
       chainId: 11155111,
       accounts: [PRIVATE_KEY],
     },
