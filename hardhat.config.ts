@@ -46,6 +46,21 @@ const config: HardhatUserConfig = {
       chainId: 97,
       accounts: [PRIVATE_KEY],
     },
+    arbitrumSepolia: {
+      url: process.env.ARB_SEPOLIA_RPC || "https://sepolia-rollup.arbitrum.io/rpc",
+      chainId: 421614,
+      accounts: [PRIVATE_KEY],
+    },
+    polygonAmoy: {
+      url: process.env.POLYGON_AMOY_RPC || "https://rpc-amoy.polygon.technology",
+      chainId: 80002,
+      accounts: [PRIVATE_KEY],
+    },
+    baseSepolia: {
+      url: process.env.BASE_SEPOLIA_RPC || "https://sepolia.base.org",
+      chainId: 84532,
+      accounts: [PRIVATE_KEY],
+    },
   },
   etherscan: {
     apiKey: {
