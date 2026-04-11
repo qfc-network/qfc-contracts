@@ -61,6 +61,11 @@ const config: HardhatUserConfig = {
       chainId: 84532,
       accounts: [PRIVATE_KEY],
     },
+    optimismSepolia: {
+      url: process.env.OP_SEPOLIA_RPC || "https://sepolia.optimism.io",
+      chainId: 11155420,
+      accounts: [PRIVATE_KEY],
+    },
   },
   etherscan: {
     apiKey: {
